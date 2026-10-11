@@ -1,6 +1,6 @@
 // Service worker di Trading Journal Pro: rende l'app utilizzabile offline.
 // Non tocca i dati (IndexedDB): memorizza solo i file dell'app. Le richieste ad altri domini (sincronizzazione) passano direttamente.
-var CACHE = 'tjp-d9e7883422';
+var CACHE = 'tjp-194da6831f';
 var FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'];
 self.addEventListener('install', function (e) { e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(FILES); }).then(function () { return self.skipWaiting(); })); });
 self.addEventListener('activate', function (e) {

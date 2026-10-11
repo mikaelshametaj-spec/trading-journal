@@ -2377,7 +2377,7 @@ function viewSettings() {
   var es = ''; try { if (navigator.storage && navigator.storage.persisted) es = ''; } catch (e) {}
   var info = h('p', { class: 'note', text: 'Archiviazione: ' + (S.dbMode === 'idb' ? 'IndexedDB del browser' : 'SOLO MEMORIA (i dati si perdono alla chiusura)') + ' · schema v' + TJ.SCHEMA_VERSION + ' · ' + S.trades.length + ' trade.' });
   var persistBtn = h('button', { class: 'btn', type: 'button', text: 'Richiedi archiviazione persistente', onclick: function () { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().then(function (ok) { toast(ok ? 'Archiviazione persistente concessa.' : 'Il browser non ha concesso la persistenza: fai backup regolari.', !ok); }); else toast('Funzione non supportata da questo browser.', true); } });
-  root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Archiviazione' }), info, persistBtn, h('p', { class: 'hint', text: 'Nessun dato lascia il tuo dispositivo. Non esiste sincronizzazione cloud né account.' })));
+  root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Archiviazione' }), info, persistBtn, h('p', { class: 'hint', text: (S.sync && S.sync.cfg) ? 'Sincronizzazione attiva: i dati vengono copiati anche nell\'archivio online collegato al tuo account (dettagli in Report e backup).' : 'Nessun dato lascia il tuo dispositivo finché non attivi l\'account di sincronizzazione (Report e backup → Sincronizzazione).' })));
   return root;
 }
 var NAV = [['dashboard', 'Dashboard', viewDashboard], ['journal', 'Trade Journal', viewJournal], ['analytics', 'Analytics', viewAnalytics], ['risk', 'Risk Management', viewRisk], ['strategies', 'Strategie e setup', viewStrategies], ['psychology', 'Diario psicologico', viewPsychology], ['calendar', 'Calendario', viewCalendar], ['backup', 'Report e backup', viewBackup], ['settings', 'Impostazioni', viewSettings]];
@@ -2463,6 +2463,7 @@ function boot(idb) {
 /* SYNC — sincronizzazione opzionale tra dispositivi tramite un progetto Supabase personale dell'utente.
    Nessuna libreria: solo fetch verso <progetto>.supabase.co (REST + Auth). I dati restano locali e funzionano offline;
    la sincronizzazione è un'aggiunta. Logica di fusione pura e testata in core.js (syncCollect / syncApply). */
+var SYNC_PRESET = (true) ? {"url":"https://bwiuxthlplazruprybke.supabase.co","anon":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ3aXV4dGhscGxhenJ1cHJ5YmtlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE3MTU1OTMsImV4cCI6MjEwNzI5MTU5M30.K6nC-eBWAtfQaiIESZw0c0hHKWnsAKrMOzFzVIbFEw4"} : null;
 var SYNC_SQL = [
   'create table if not exists public.tj_sync (',
   '  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,',
@@ -2477,7 +2478,8 @@ var SYNC_SQL = [
   'alter table public.tj_sync enable row level security;',
   'drop policy if exists "solo i miei dati" on public.tj_sync;',
   'create policy "solo i miei dati" on public.tj_sync for all',
-  '  using (auth.uid() = user_id) with check (auth.uid() = user_id);'
+  '  using (auth.uid() = user_id) with check (auth.uid() = user_id);',
+  'grant select, insert, update, delete on public.tj_sync to authenticated;'
 ].join('\n');
 S.sync = { cfg: null, pushed: {}, state: 'off', msg: '', at: 0, running: false, again: false, timer: null, applying: false, lastCounts: null, started: false };
 var SYNC_SKEW_MS = 300000, SYNC_BATCH = 150, SYNC_TIMEOUT = 25000;
@@ -2626,19 +2628,25 @@ function syncCard() {
       h('button', { class: 'btn', type: 'button', text: 'Disattiva su questo dispositivo', onclick: function () { askConfirm({ title: 'Disattivare la sincronizzazione?', message: 'Su questo dispositivo smetterà di inviare e ricevere. I dati locali e quelli sul server NON vengono cancellati.', confirmLabel: 'Disattiva' }).then(function (ok) { if (ok) syncDisable().then(function () { toast('Sincronizzazione disattivata.'); render(); }); }); } })));
     if (s.state === 'error' && /accedi di nuovo/i.test(s.msg)) card.appendChild(h('p', { class: 'hint', text: 'Per accedere di nuovo disattiva e riattiva la sincronizzazione con la stessa email e password.' }));
   } else {
-    card.appendChild(h('div', { class: 'banner warn' }, h('b', { text: 'Attenzione: i dati lasciano il dispositivo. ' }), 'Con la sincronizzazione attiva trade, note e impostazioni vengono copiati nel TUO progetto Supabase (un servizio online esterno). Gli screenshot non vengono sincronizzati. Se non vuoi alcun servizio esterno, non attivarla e usa il backup JSON.'));
+    var PS = SYNC_PRESET;
+    if (PS) card.appendChild(h('div', { class: 'banner warn' }, h('b', { text: 'Attenzione: i dati lasciano il dispositivo. ' }), 'Con l\'account, trade, note e impostazioni vengono copiati nell\'archivio online gestito da chi ti ha dato questa app (servizio Supabase), associati alla tua email. Ogni utente vede solo i propri dati, ma chi gestisce il servizio può tecnicamente accedervi. Gli screenshot non vengono sincronizzati. Se perdi la password non c\'è recupero automatico della copia online (i dati sul dispositivo restano). Se non vuoi tutto questo, non creare l\'account e usa il backup JSON.'));
+    else card.appendChild(h('div', { class: 'banner warn' }, h('b', { text: 'Attenzione: i dati lasciano il dispositivo. ' }), 'Con la sincronizzazione attiva trade, note e impostazioni vengono copiati nel TUO progetto Supabase (un servizio online esterno). Gli screenshot non vengono sincronizzati. Se non vuoi alcun servizio esterno, non attivarla e usa il backup JSON.'));
     var sql = h('pre', { class: 'sqlbox', text: SYNC_SQL });
-    card.appendChild(h('details', {}, h('summary', { text: 'Come si configura (una volta sola, ~5 minuti)' }), h('ol', { class: 'steps' },
+    var setupDetails = h('details', {}, h('summary', { text: 'Come si configura (una volta sola, ~5 minuti)' }), h('ol', { class: 'steps' },
       h('li', { text: 'Crea un account gratuito su supabase.com e un nuovo progetto (scegli la regione Europa).' }),
       h('li', { text: 'Menu SQL Editor → New query → incolla lo script qui sotto → Run.' }),
       h('li', { text: 'Authentication → Sign In / Providers → Email: per semplicità disattiva «Confirm email» (altrimenti dovrai confermare l\'email ricevuta).' }),
       h('li', { text: 'Project Settings → API: copia «Project URL» (https://xxxx.supabase.co) e la chiave «anon / public».' }),
       h('li', { text: 'Incolla URL e chiave qui sotto, scegli email e password (min. 6 caratteri) e tocca «Crea account». Sull\'altro dispositivo usa gli STESSI dati e tocca «Accedi».' })), sql,
-      h('button', { class: 'btn sm', type: 'button', text: 'Copia lo script SQL', onclick: function () { try { navigator.clipboard.writeText(SYNC_SQL).then(function () { toast('Script copiato.'); }, function () { toast('Copia non riuscita: selezionalo a mano.', true); }); } catch (e) { toast('Copia non riuscita: selezionalo a mano.', true); } } })));
+      h('button', { class: 'btn sm', type: 'button', text: 'Copia lo script SQL', onclick: function () { try { navigator.clipboard.writeText(SYNC_SQL).then(function () { toast('Script copiato.'); }, function () { toast('Copia non riuscita: selezionalo a mano.', true); }); } catch (e) { toast('Copia non riuscita: selezionalo a mano.', true); } } }));
+    if (!PS) card.appendChild(setupDetails);
     var fU = h('input', { class: 'f', type: 'url', placeholder: 'https://xxxx.supabase.co', autocomplete: 'off', 'aria-label': 'Project URL', inputmode: 'url', autocapitalize: 'off' }), fK = h('input', { class: 'f', type: 'text', placeholder: 'chiave anon / public', autocomplete: 'off', 'aria-label': 'Chiave anon', autocapitalize: 'off' }),
       fE = h('input', { class: 'f', type: 'email', autocomplete: 'username', 'aria-label': 'Email' }), fP = h('input', { class: 'f', type: 'password', autocomplete: 'current-password', 'aria-label': 'Password' }), err = h('div', { class: 'err', role: 'alert' });
+    var consent = h('input', { type: 'checkbox', id: 'sync-consent', 'aria-label': 'Ho capito che i dati vengono copiati nell\'archivio online' });
+    if (PS) { fU.value = PS.url; fK.value = PS.anon; }
     function go(mode) {
       err.textContent = ''; var url = fU.value.trim().replace(/\/+$/, ''), key = fK.value.trim(), em = fE.value.trim(), pw = fP.value;
+      if (PS && fU.value === PS.url && !consent.checked) { err.textContent = 'Spunta la casella per confermare di aver letto l\'avviso sui dati.'; return; }
       if (!syncUrlOk(url)) { err.textContent = 'L\'URL deve essere del tipo https://xxxx.supabase.co'; return; }
       if (key.length < 20) { err.textContent = 'Chiave anon mancante o troppo corta.'; return; }
       if (!/^\S+@\S+\.\S+$/.test(em)) { err.textContent = 'Email non valida.'; return; }
@@ -2649,7 +2657,11 @@ function syncCard() {
         S.sync.pushed = {}; return syncSaveCfg().then(function () { S.sync.started = false; toast('Sincronizzazione attiva.'); return syncStart(); }).then(function () { render(); });
       }, function (e) { S.sync.cfg = prev; err.textContent = (mode === 'signup' ? 'Creazione non riuscita: ' : 'Accesso non riuscito: ') + friendlyError(e); });
     }
-    card.appendChild(h('div', { class: 'fgrid', style: 'margin-top:10px' }, h('label', { class: 's2' }, 'Project URL', fU), h('label', { class: 's2' }, 'Chiave anon / public', fK), h('label', {}, 'Email', fE), h('label', {}, 'Password', fP)));
+    var lU = h('label', { class: 's2' }, 'Project URL', fU), lK = h('label', { class: 's2' }, 'Chiave anon / public', fK);
+    if (PS) { lU.hidden = true; lK.hidden = true; }
+    card.appendChild(h('div', { class: 'fgrid', style: 'margin-top:10px' }, lU, lK, h('label', {}, 'Email', fE), h('label', {}, 'Password (min. 6 caratteri)', fP)));
+    if (PS) { card.appendChild(h('label', { class: 'row', style: 'gap:8px;margin-top:8px' }, consent, 'Ho capito che i miei dati vengono copiati nell\'archivio online e che non c\'è recupero password.'));
+      card.appendChild(h('details', { style: 'margin-top:8px' }, h('summary', { text: 'Avanzate: uso un mio progetto Supabase' }), h('p', { class: 'hint', text: 'Cambia URL e chiave qui sotto, poi crea l\'account o accedi.' }), h('button', { class: 'btn sm', type: 'button', text: 'Mostra URL e chiave', onclick: function () { lU.hidden = false; lK.hidden = false; } }), setupDetails)); }
     card.appendChild(err); card.appendChild(h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', text: 'Crea account e attiva', onclick: function () { go('signup'); } }), h('button', { class: 'btn', type: 'button', text: 'Accedi (account già creato)', onclick: function () { go('login'); } })));
     card.appendChild(h('p', { class: 'hint', text: 'La password non viene salvata: resta solo un token di sessione in questo browser. La chiave anon è pubblica per progetto; la protezione dei dati è data dall\'accesso per utente (RLS) dello script SQL.' }));
   }
