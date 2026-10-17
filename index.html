@@ -96,6 +96,7 @@ legend{padding:0 6px;color:var(--gold);font-weight:600;font-size:13px}
 .fgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
 .fgrid .s2{grid-column:span 2} .fgrid .s4{grid-column:1/-1}
 .fgrid label,form label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--dim);min-width:0}
+.legcard{border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px;margin:0 0 10px;background:var(--panel2)} .legcard .lh{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap} .legcard .lh b{margin-right:auto} .legcard .legres{font-size:12px;color:var(--dim);margin-top:6px;min-height:1em} input.f[readonly]{opacity:.7}
 .live{background:var(--panel2);border:1px solid var(--border2);border-radius:var(--radius);padding:10px 14px;margin-bottom:12px;font-size:13px}
 .live .kv{display:flex;flex-wrap:wrap;gap:6px 22px}
 .live ul,.issues{margin:6px 0 0;padding-left:18px;color:var(--warn);font-size:12.5px}
@@ -301,6 +302,35 @@ var TJ = (function () {
   function uniqStrings(a) { var out = [], seen = {}; (Array.isArray(a) ? a : []).forEach(function (x) { var s = str(x); if (!s) return; var k = s.toLowerCase(); if (!seen[k]) { seen[k] = 1; out.push(s); } }); return out; }
   function scale15(v) { var n = num(v); return n != null && n >= 1 && n <= 5 ? Math.round(n) : null; }
 
+  // ---- Posizioni multiple ("legs"): più ingressi/uscite a prezzi diversi nello stesso trade.
+  // I campi del trade (entry, size, sl, tp, exit) diventano le MEDIE PESATE per quantità delle posizioni:
+  // le formule sono lineari nella quantità, quindi il risultato del trade = somma dei risultati delle posizioni.
+  var LEG_REASONS = ['tp', 'sl', 'be', 'manual', 'trailing'], MAX_LEGS = 20;
+  function normalizeLegs(a) {
+    if (!Array.isArray(a)) return [];
+    return a.slice(0, MAX_LEGS).filter(function (x) { return x && typeof x === 'object'; }).map(function (x) {
+      return { entry: num(x.entry), size: num(x.size), sl: num(x.sl), tp: num(x.tp), exit: num(x.exit), exitDate: str(x.exitDate), exitTime: str(x.exitTime), reason: LEG_REASONS.indexOf(x.reason) >= 0 ? x.reason : '' };
+    });
+  }
+  function legsAvg(L, key) {
+    var sw = 0, sv = 0;
+    for (var i = 0; i < L.length; i++) { var v = L[i][key], w = L[i].size; if (v == null || w == null || !(w > 0)) return null; sw += w; sv += v * w; }
+    return sw > 0 ? round(sv / sw, 12) : null;
+  }
+  function legsAllClosed(L) { return L.length > 0 && L.every(function (l) { return l.exit != null; }); }
+  function applyLegs(t) {
+    var L = t.legs; if (!L.length) return t;
+    var sizeOk = L.every(function (l) { return l.size != null && l.size > 0; });
+    t.size = sizeOk ? round(sum(L.map(function (l) { return l.size; })), 12) : null;
+    t.entry = legsAvg(L, 'entry'); t.sl = legsAvg(L, 'sl'); t.tp = legsAvg(L, 'tp');
+    if (legsAllClosed(L)) {
+      t.exit = legsAvg(L, 'exit'); t.status = 'closed';
+      var last = L.filter(function (l) { return l.exitDate || l.exitTime; }).sort(function (a, b) { var x = (a.exitDate || t.date) + ' ' + (a.exitTime || ''), y = (b.exitDate || t.date) + ' ' + (b.exitTime || ''); return x < y ? -1 : (x > y ? 1 : 0); }).pop();
+      if (last) { t.exitDate = last.exitDate || ''; t.exitTime = last.exitTime || ''; }
+    } else { t.exit = null; t.status = 'open'; }
+    return t;
+  }
+
   function normalizeTrade(raw) {
     var r = raw || {}, p = r.psych || {}, fl = p.flags || {};
     var t = {
@@ -318,10 +348,11 @@ var TJ = (function () {
       psych: { focus: scale15(p.focus), confidence: scale15(p.confidence), sleep: scale15(p.sleep),
         criteria: (p.criteria === 'yes' || p.criteria === 'partial' || p.criteria === 'no') ? p.criteria : '',
         followedPlan: (p.followedPlan === 'yes' || p.followedPlan === 'partial' || p.followedPlan === 'no') ? p.followedPlan : '', flags: {} },
-      shotBefore: str(r.shotBefore), shotAfter: str(r.shotAfter), createdAt: num(r.createdAt) || Date.now(), updatedAt: num(r.updatedAt) || Date.now()
+      shotBefore: str(r.shotBefore), shotAfter: str(r.shotAfter), createdAt: num(r.createdAt) || Date.now(), updatedAt: num(r.updatedAt) || Date.now(),
+      legs: normalizeLegs(r.legs)
     };
     FLAGS.forEach(function (f) { t.psych.flags[f[0]] = !!fl[f[0]]; });
-    return t;
+    return applyLegs(t);
   }
 
   function derive(t, ctx) {
@@ -377,7 +408,7 @@ var TJ = (function () {
 
     var a = minutes(t.date, t.entryTime), b = minutes(t.exitDate || t.date, t.exitTime);
     d.durationMin = null;
-    if (a != null && b != null) { if (b >= a) d.durationMin = b - a; else issue('durata_negativa', 'L\'uscita è precedente all\'entrata.'); }
+    if (a != null && b != null) { if (b >= a) d.durationMin = b - a; else issue('durata_negativa', 'L\'uscita (' + fmtDate(t.exitDate || t.date) + ' ' + t.exitTime + ') è precedente all\'entrata (' + fmtDate(t.date) + ' ' + t.entryTime + '). Controlla data e ora di uscita in Dettagli avanzati.'); }
 
     if (t.status === 'open') d.outcome = 'open';
     else if (d.netEff != null) d.outcome = Math.abs(d.netEff) <= beTol + EPS ? 'be' : (d.netEff > 0 ? 'win' : 'loss');
@@ -389,6 +420,24 @@ var TJ = (function () {
     if (t.outcomeDeclared && d.outcomeSource && d.outcomeSource !== 'dichiarato' && t.outcomeDeclared !== d.outcome)
       issue('esito_incoerente', 'Esito dichiarato (' + t.outcomeDeclared + ') diverso da quello dedotto dal ' + d.outcomeSource + ' (' + d.outcome + ').');
     if (d.outcome === 'unknown') issue('manca_risultato', 'Trade chiuso senza P&L, R né esito: escluso dalle statistiche.');
+    d.legRows = [];
+    if (t.legs && t.legs.length) {
+      var anySl = t.legs.some(function (l) { return l.sl != null; }), anyTp = t.legs.some(function (l) { return l.tp != null; });
+      if (anySl && t.sl == null) issue('stop_parziale', 'Non tutte le posizioni hanno lo stop loss: rischio e R del trade non calcolabili.');
+      if (anyTp && t.tp == null) issue('tp_parziale', 'Non tutte le posizioni hanno un take profit: R pianificato non calcolabile.');
+      t.legs.forEach(function (l, i) {
+        var row = { i: i, closed: l.exit != null, gross: null, risk: null, r: null, plannedR: null, hitTp: false, reason: l.reason };
+        if (sign && l.entry != null && l.size != null && t.pointValue != null) {
+          if (l.exit != null) row.gross = round(sign * (l.exit - l.entry) * l.size * t.pointValue, 8);
+          if (l.sl != null) { var ld = sign * (l.entry - l.sl); if (ld > EPS) { row.risk = round(ld * l.size * t.pointValue, 8); if (row.gross != null) row.r = round(row.gross / row.risk, 6); if (l.tp != null && sign * (l.tp - l.entry) > 0) row.plannedR = round(sign * (l.tp - l.entry) / ld, 6); } }
+        }
+        if (sign && l.exit != null && l.tp != null) row.hitTp = sign * (l.exit - l.tp) >= -EPS;
+        d.legRows.push(row);
+      });
+      var closedRows = d.legRows.filter(function (r) { return r.closed && r.gross != null; });
+      d.legRealizedGross = closedRows.length ? round(sum(closedRows.map(function (r) { return r.gross; })), 8) : null;
+      d.legsOpen = t.legs.filter(function (l) { return l.exit == null; }).length;
+    }
     if (t.status === 'open' && (t.exit != null || t.pnlNet != null)) issue('aperto_con_risultato', 'Trade segnato come aperto ma con uscita o P&L: è escluso dalle statistiche.');
     return d;
   }
@@ -723,14 +772,30 @@ var TJ = (function () {
     return s;
   }
   var CSV_COLS = ['id', 'date', 'entryTime', 'exitDate', 'exitTime', 'status', 'asset', 'market', 'direction', 'session', 'tfEntry', 'tfHtf', 'account', 'strategy', 'tags',
-    'entry', 'sl', 'tp', 'exit', 'size', 'pointValue', 'commissions', 'swap', 'otherCosts', 'slippage', 'riskMoney', 'pnlGross', 'pnlNet', 'rDeclared', 'notes', 'noteAfter', 'discipline', 'setupQuality', 'calc_R', 'calc_net', 'esito'];
+    'entry', 'sl', 'tp', 'exit', 'size', 'pointValue', 'commissions', 'swap', 'otherCosts', 'slippage', 'riskMoney', 'pnlGross', 'pnlNet', 'rDeclared', 'notes', 'noteAfter', 'discipline', 'setupQuality', 'calc_R', 'calc_net', 'esito', 'posizioni'];
+  // Formato testo di una posizione: entry/size/sl/tp/exit/motivo  (decimali con il punto; vuoto = non indicato). Posizioni separate da " | ".
+  function legsToText(L) {
+    if (!L || !L.length) return '';
+    return L.map(function (l) { return [l.entry, l.size, l.sl, l.tp, l.exit, l.reason].map(function (v) { return v == null ? '' : String(v); }).join('/'); }).join(' | ');
+  }
+  function legsFromText(txt) {
+    var out = [], bad = false;
+    String(txt || '').split('|').forEach(function (part) {
+      part = part.trim(); if (!part) return;
+      var f = part.split('/').map(function (x) { return x.trim(); });
+      if (f.length < 2 || f.length > 6) { bad = true; return; }
+      var nums = f.slice(0, 5).map(function (x) { var n = num(x); if (x !== '' && n === null) bad = true; return n; });
+      out.push({ entry: nums[0], size: nums[1], sl: nums[2] === undefined ? null : nums[2], tp: nums[3] === undefined ? null : nums[3], exit: nums[4] === undefined ? null : nums[4], reason: f[5] || '' });
+    });
+    return { legs: out, bad: bad };
+  }
   function toCSV(items, opt) {
     opt = opt || {}; var delim = opt.delimiter || ';', comma = !!opt.decimalComma, rows = [CSV_COLS.join(delim)];
     items.forEach(function (x) {
       var t = x.t, d = x.d;
       var rec = [t.id, t.date, t.entryTime, t.exitDate, t.exitTime, t.status, t.asset, t.market, t.direction, t.session, t.tfEntry, t.tfHtf, t.account, t.strategy, t.tags.join(' | '),
         t.entry, t.sl, t.tp, t.exit, t.size, t.pointValue, t.commissions, t.swap, t.otherCosts, t.slippage, t.riskMoney, t.pnlGross, t.pnlNet, t.rDeclared, t.notes, t.noteAfter, t.discipline, t.setupQuality,
-        d.rCalc == null ? null : round(d.rCalc, 4), d.calcNet == null ? null : round(d.calcNet, 4), d.outcome];
+        d.rCalc == null ? null : round(d.rCalc, 4), d.calcNet == null ? null : round(d.calcNet, 4), d.outcome, legsToText(t.legs)];
       rows.push(rec.map(function (v) { return csvCell(v, delim, comma); }).join(delim));
     });
     return (opt.bom === false ? '' : '﻿') + rows.join('\r\n');
@@ -764,6 +829,7 @@ var TJ = (function () {
       var raw = {}, bad = [];
       head.forEach(function (h, j) { if (!h || /^calc_|^esito$/.test(h)) return; var v = (rows[i][j] || '').trim(); if (/^'[=+\-@]/.test(v)) v = v.slice(1); raw[h] = v; });
       ['entry', 'sl', 'tp', 'exit', 'size', 'pointValue', 'commissions', 'swap', 'otherCosts', 'slippage', 'riskMoney', 'pnlGross', 'pnlNet', 'rDeclared'].forEach(function (k) { if (raw[k] !== undefined && raw[k] !== '' && num(raw[k]) === null) bad.push(k + ' non numerico ("' + raw[k] + '")'); });
+      if (raw.posizioni !== undefined) { var lg = legsFromText(raw.posizioni); if (lg.bad) bad.push('posizioni non valide ("' + raw.posizioni + '"): formato entry/quantità/stop/tp/uscita | …'); else if (lg.legs.length) raw.legs = lg.legs; delete raw.posizioni; }
       if (raw.tags !== undefined) raw.tags = String(raw.tags).split(/\s*\|\s*|\s*;\s*/).filter(Boolean);
       if (raw.direction) { var dv = raw.direction.toLowerCase(); raw.direction = (dv === 'long' || dv === 'buy' || dv === 'l') ? 'long' : ((dv === 'short' || dv === 'sell' || dv === 's') ? 'short' : ''); }
       if (raw.status) raw.status = /open|apert/i.test(raw.status) ? 'open' : 'closed';
@@ -785,6 +851,17 @@ var TJ = (function () {
     if (t.exitDate && !parseDate(t.exitDate)) e.push('Data di uscita non valida.');
     [['entry', 'Entry'], ['sl', 'Stop loss'], ['tp', 'Take profit'], ['exit', 'Uscita'], ['size', 'Quantità'], ['pointValue', 'Valore del punto']].forEach(function (p) { if (t[p[0]] != null && t[p[0]] <= 0) e.push(p[1] + ' deve essere maggiore di zero.'); });
     if (t.riskMoney != null && t.riskMoney < 0) e.push('Il rischio monetario non può essere negativo.');
+    (t.legs || []).forEach(function (l, i) {
+      var n = 'Posizione ' + (i + 1) + ': ';
+      if (l.entry == null) e.push(n + 'indica il prezzo di entrata.');
+      if (l.size == null || !(l.size > 0)) e.push(n + 'indica una quantità maggiore di zero.');
+      [['entry', 'entry'], ['sl', 'stop loss'], ['tp', 'take profit'], ['exit', 'uscita']].forEach(function (p) { if (l[p[0]] != null && l[p[0]] <= 0) e.push(n + p[1] + ' deve essere maggiore di zero.'); });
+      if (l.exitDate && !parseDate(l.exitDate)) e.push(n + 'data di uscita non valida.');
+      if (l.exitTime && !parseTime(l.exitTime)) e.push(n + 'ora di uscita non valida.');
+      var sg = t.direction === 'long' ? 1 : (t.direction === 'short' ? -1 : 0);
+      if (sg && l.entry != null && l.sl != null && l.entry > 0 && sg * (l.entry - l.sl) <= 0) w.push(n + 'lo stop loss è dal lato sbagliato rispetto alla direzione.');
+      if (sg && l.entry != null && l.tp != null && l.entry > 0 && sg * (l.tp - l.entry) <= 0) w.push(n + 'il take profit è dal lato sbagliato rispetto alla direzione.');
+    });
     if (d) d.issues.forEach(function (i) { if (i.code === 'durata_negativa') e.push(i.msg); else w.push(i.msg); });
     ['commissions', 'swap', 'otherCosts'].forEach(function (k) { if (t[k] != null && t[k] < 0) w.push('Un costo negativo viene trattato come rimborso.'); });
     if (t.date && t.date > todayStr()) w.push('La data è nel futuro.');
@@ -836,7 +913,7 @@ var TJ = (function () {
   }
   return { SCHEMA_VERSION: SCHEMA_VERSION, APP_ID: APP_ID, FLAGS: FLAGS, CSV_COLS: CSV_COLS, EPS: EPS, num: num, parseField: parseField, sum: sum, mean: mean, round: round,
     parseDate: parseDate, parseTime: parseTime, dayNum: dayNum, fromDayNum: fromDayNum, addDays: addDays, weekdayMon: weekdayMon, weekStart: weekStart, minutes: minutes, todayStr: todayStr, fmtDate: fmtDate, lastDayOfMonth: lastDayOfMonth, newId: newId, resolvePeriod: resolvePeriod, hashtags: hashtags, periodRange: periodRange,
-    normalizeTrade: normalizeTrade, derive: derive, deriveAll: deriveAll, chronoCmp: chronoCmp, validateTrade: validateTrade, computeMetrics: computeMetrics, equitySeries: equitySeries, groupMetrics: groupMetrics, costBreakdown: costBreakdown, weeklyReview: weeklyReview, integrityReport: integrityReport, syncCollect: syncCollect, syncApply: syncApply, positionSize: positionSize, forexSize: forexSize, parsePair: parsePair, pipSizeFor: pipSizeFor, quoteToAccountRate: quoteToAccountRate, tagPairs: tagPairs, tagsOf: tagsOf, aggregateBy: aggregateBy,
+    normalizeTrade: normalizeTrade, normalizeLegs: normalizeLegs, legsToText: legsToText, LEG_REASONS: LEG_REASONS, MAX_LEGS: MAX_LEGS, derive: derive, deriveAll: deriveAll, chronoCmp: chronoCmp, validateTrade: validateTrade, computeMetrics: computeMetrics, equitySeries: equitySeries, groupMetrics: groupMetrics, costBreakdown: costBreakdown, weeklyReview: weeklyReview, integrityReport: integrityReport, syncCollect: syncCollect, syncApply: syncApply, positionSize: positionSize, forexSize: forexSize, parsePair: parsePair, pipSizeFor: pipSizeFor, quoteToAccountRate: quoteToAccountRate, tagPairs: tagPairs, tagsOf: tagsOf, aggregateBy: aggregateBy,
     applyFilters: applyFilters, startEquityBefore: startEquityBefore, sampleLevel: sampleLevel, toCSV: toCSV, parseCSV: parseCSV, csvToTrades: csvToTrades, detectDelimiter: detectDelimiter, fingerprint: fingerprint,
     migrateLegacyTrade: migrateLegacyTrade, buildBackup: buildBackup, validateBackup: validateBackup, normalizeSettings: normalizeSettings, DEFAULT_SETTINGS: DEFAULT_SETTINGS };
 })();
@@ -1410,7 +1487,7 @@ function viewJournal() {
       var t = x.t, d = x.d;
       var row = h('tr', { class: 'click' + (d.issues.length ? ' bad' : ''), tabindex: '0', 'aria-label': 'Apri dettaglio ' + t.asset + ' del ' + TJ.fmtDate(t.date), onclick: function () { openDetail(t.id); }, onkeydown: function (e) { if (e.key === 'Enter' && e.target === row) openDetail(t.id); } });
       row.appendChild(td(d.issues.length ? h('span', { class: 'warn', title: d.issues.map(function (i) { return i.msg; }).join('\n'), 'aria-label': 'Dati incompleti o incoerenti: ' + d.issues.map(function (i) { return i.msg; }).join(' '), text: '⚠' }) : '', 't'));
-      row.appendChild(td(TJ.fmtDate(t.date) + (t.entryTime ? ' ' + t.entryTime : ''))); row.appendChild(td(t.asset, 't')); row.appendChild(td(h('span', { class: 'pill ' + t.direction, text: t.direction === 'long' ? 'Long' : 'Short' }), 't'));
+      row.appendChild(td(TJ.fmtDate(t.date) + (t.entryTime ? ' ' + t.entryTime : ''))); row.appendChild(td(t.asset + (t.legs && t.legs.length > 1 ? ' · ' + t.legs.length + ' pos.' : ''), 't')); row.appendChild(td(h('span', { class: 'pill ' + t.direction, text: t.direction === 'long' ? 'Long' : 'Short' }), 't'));
       row.appendChild(td(t.strategy || '—', 't hide-sm')); row.appendChild(td(t.session || '—', 't hide-sm')); row.appendChild(td(price(t.entry), 'hide-sm')); row.appendChild(td(price(t.exit), 'hide-sm'));
       row.appendChild(td(rfmt(d.rEff, true), 'num ' + tone(d.rEff))); row.appendChild(td(money(d.netEff, true), 'num ' + tone(d.netEff))); row.appendChild(td(h('span', { class: 'pill ' + d.outcome, text: OUT_LABEL[d.outcome] }), 't'));
       row.appendChild(h('td', { class: 't' }, h('span', { class: 'row', style: 'flex-wrap:nowrap' },
@@ -1436,7 +1513,7 @@ function viewJournal() {
   root.appendChild(results); paint(); return root;
 }
 function duplicateTrade(id) {
-  var src = S.byId[id].t, t = TJ.normalizeTrade(Object.assign({}, src, { id: '', date: TJ.todayStr(), entryTime: '', exitDate: '', exitTime: '', status: 'open', exit: null, pnlGross: null, pnlNet: null, rDeclared: null, outcomeDeclared: '', shotBefore: '', shotAfter: '', createdAt: Date.now(), lesson: '', notes: '', mistakes: [], psych: Object.assign({}, src.psych, { followedPlan: '', flags: {} }) }));
+  var src = S.byId[id].t, t = TJ.normalizeTrade(Object.assign({}, src, { id: '', date: TJ.todayStr(), entryTime: '', exitDate: '', exitTime: '', status: 'open', legs: (src.legs || []).map(function (l) { return Object.assign({}, l, { exit: null, exitDate: '', exitTime: '', reason: '' }); }), exit: null, pnlGross: null, pnlNet: null, rDeclared: null, outcomeDeclared: '', shotBefore: '', shotAfter: '', createdAt: Date.now(), lesson: '', notes: '', mistakes: [], psych: Object.assign({}, src.psych, { followedPlan: '', flags: {} }) }));
   openTradeForm(null, t);
 }
 function removeTrade(id, afterClose) {
@@ -1461,6 +1538,17 @@ function openDetail(id) {
   body.appendChild(h('h3', { text: 'Esecuzione', style: 'margin:10px 0 6px' }));
   body.appendChild(kvRows([['Entry', f(t.entry)], ['Stop loss', f(t.sl)], ['Take profit', f(t.tp)], ['Uscita', f(t.exit)], ['Quantità', f(t.size)], ['Valore del punto', f(t.pointValue)], ['Commissioni / swap / altri costi', d.costsEntered ? money(t.commissions || 0) + ' / ' + money(t.swap || 0) + ' / ' + money(t.otherCosts || 0) : ''], ['Slippage (informativo)', f(t.slippage)],
     ['P&L lordo', d.grossEff == null ? '' : money(d.grossEff, true) + ' (' + d.grossSource + ')'], ['P&L netto dichiarato', t.pnlNet == null ? '' : money(t.pnlNet, true)], ['P&L netto calcolato', d.calcNet == null ? '' : money(d.calcNet, true)], ['R dichiarato', t.rDeclared == null ? '' : rfmt(t.rDeclared)]]));
+  if (t.legs && t.legs.length) {
+    var LREASON = { tp: 'Take profit', sl: 'Stop loss', be: 'Break-even', manual: 'Manuale', trailing: 'Trailing' };
+    body.appendChild(h('h3', { text: 'Posizioni (' + t.legs.length + ')', style: 'margin:10px 0 6px' }));
+    var lh = h('tr'); ['#', 'Entry', 'Qtà', 'Stop', 'TP', 'Uscita', 'Motivo', 'P&L lordo', 'R'].forEach(function (c, i) { lh.appendChild(h('th', { class: i >= 7 ? 'num' : '', scope: 'col', text: c })); });
+    var lb = h('tbody');
+    t.legs.forEach(function (l, i) { var r = d.legRows[i] || {};
+      lb.appendChild(h('tr', {}, td(String(i + 1), 't'), td(price(l.entry), ''), td(f(l.size) || '—', ''), td(price(l.sl), ''), td(price(l.tp), ''), td(l.exit == null ? 'aperta' : price(l.exit) + (r.hitTp ? ' ✓TP' : ''), ''), td(LREASON[l.reason] || '—', 't'), td(money(r.gross, true), 'num ' + tone(r.gross)), td(rfmt(r.r, true), 'num ' + tone(r.r))));
+    });
+    body.appendChild(h('div', { class: 'tablewrap' }, h('table', { class: 'jtable' }, h('thead', {}, lh), lb)));
+    body.appendChild(h('p', { class: 'hint', text: 'Entry, uscita, stop e TP del trade sono le medie pesate per quantità delle posizioni; il P&L del trade è la somma delle posizioni.' }));
+  }
   body.appendChild(h('h3', { text: 'Analisi tecnica', style: 'margin:10px 0 6px' }));
   body.appendChild(kvRows([['Strategia', t.strategy], ['Bias HTF', t.bias], ['Condizioni di mercato', t.condition], ['Concetti / tag', x.tg], ['Conferme di ingresso', t.confirmations], ['Eventi macro', t.macro]]));
   body.appendChild(h('h3', { text: 'Diario personale', style: 'margin:10px 0 6px' }));
@@ -1622,12 +1710,50 @@ function openTradeForm(id, template) {
   var errBox = h('div', { class: 'err', role: 'alert', 'aria-live': 'assertive' });
   var cancel = h('button', { class: 'btn', type: 'button', text: 'Annulla', onclick: function () { modal.requestClose(); } });
   var saveBtn = h('button', { class: 'btn primary', type: 'submit', text: existing ? 'Salva modifiche' : 'Salva trade' });
+  // ---- Posizioni multiple (TP1/TP2… a prezzi diversi)
+  var legsState = (base.legs || []).map(function (l) { var o = {}; ['entry', 'size', 'sl', 'tp', 'exit'].forEach(function (k) { o[k] = l[k] == null ? '' : String(l[k]); }); o.reason = l.reason || ''; o.exitDate = l.exitDate || ''; o.exitTime = l.exitTime || ''; return o; });
+  var legsOn = legsState.length > 0, legsBox = h('div'), legInfo = [], legEls = [];
+  var LEGLAB = { entry: 'Entry', size: 'Quantità', sl: 'Stop loss', tp: 'Take profit', exit: 'Uscita' };
+  function fire() { dirty = true; form.dispatchEvent(new Event('input', { bubbles: true })); }
+  function lockTop(on) {
+    ['entry', 'size', 'sl', 'tp', 'exit'].forEach(function (k) { if (on) F[k].el.setAttribute('readonly', ''); else F[k].el.removeAttribute('readonly'); });
+    F.status.el.disabled = on; if (on) F.status.el.setAttribute('title', 'Con più posizioni lo stato dipende dalle uscite'); else F.status.el.removeAttribute('title');
+  }
+  function drawLegs() {
+    clear(legsBox); legInfo = []; legEls = [];
+    if (!legsOn) return;
+    legsState.forEach(function (L, i) {
+      var els = {}, info = h('div', { class: 'legres', 'aria-live': 'polite' }); legInfo.push(info); legEls.push(els);
+      function f(k, label) { var el = h('input', { class: 'f', type: 'text', inputmode: 'decimal', autocomplete: 'off', value: L[k], 'aria-label': 'Posizione ' + (i + 1) + ': ' + label, oninput: function () { L[k] = el.value; } }); els[k] = el; return h('label', {}, label, el); }
+      var rs = h('select', { class: 'f', 'aria-label': 'Posizione ' + (i + 1) + ': motivo di uscita', onchange: function () { L.reason = rs.value; } });
+      [['', '—'], ['tp', 'Take profit'], ['sl', 'Stop loss'], ['be', 'Break-even'], ['manual', 'Manuale'], ['trailing', 'Trailing']].forEach(function (p) { rs.appendChild(h('option', { value: p[0], text: p[1], selected: p[0] === L.reason })); });
+      var xd = h('input', { class: 'f', type: 'date', value: L.exitDate, 'aria-label': 'Posizione ' + (i + 1) + ': data di uscita', oninput: function () { L.exitDate = xd.value; } }), xt = h('input', { class: 'f', type: 'time', value: L.exitTime, 'aria-label': 'Posizione ' + (i + 1) + ': ora di uscita', oninput: function () { L.exitTime = xt.value; } });
+      legsBox.appendChild(h('div', { class: 'legcard' },
+        h('div', { class: 'lh' }, h('b', { text: 'Posizione ' + (i + 1) }),
+          h('button', { class: 'btn sm', type: 'button', text: 'Copia', 'aria-label': 'Copia posizione ' + (i + 1), onclick: function () { if (legsState.length >= TJ.MAX_LEGS) return; legsState.splice(i + 1, 0, { entry: L.entry, size: L.size, sl: L.sl, tp: L.tp, exit: '', reason: '', exitDate: '', exitTime: '' }); drawLegs(); fire(); } }),
+          h('button', { class: 'btn sm danger', type: 'button', text: 'Rimuovi', disabled: legsState.length <= 1, 'aria-label': 'Rimuovi posizione ' + (i + 1), onclick: function () { legsState.splice(i, 1); drawLegs(); fire(); } })),
+        h('div', { class: 'fgrid' }, f('entry', 'Entry'), f('size', 'Quantità'), f('sl', 'Stop loss'), f('tp', 'Take profit'), f('exit', 'Uscita (vuota = ancora aperta)'), h('label', {}, 'Motivo uscita', rs)),
+        h('details', { style: 'margin-top:8px', open: (L.exitDate || L.exitTime) ? 'open' : null }, h('summary', { text: 'Data e ora di uscita (facoltative)' }), h('div', { class: 'fgrid', style: 'margin-top:6px' }, h('label', {}, 'Data', xd), h('label', {}, 'Ora', xt))),
+        info));
+    });
+  }
+  var legsChk = h('input', { type: 'checkbox', checked: legsOn, onchange: function () {
+    legsOn = legsChk.checked;
+    if (legsOn) { var g = function (k) { return F[k].get().trim(); }; legsState = [{ entry: g('entry'), size: g('size'), sl: g('sl'), tp: g('tp'), exit: g('exit'), reason: '', exitDate: '', exitTime: '' }, { entry: g('entry'), size: '', sl: g('sl'), tp: '', exit: '', reason: '', exitDate: '', exitTime: '' }]; }
+    else legsState = [];
+    lockTop(legsOn); drawLegs(); addLegBtn.hidden = !legsOn; legsHelp.hidden = !legsOn; fire(); } });
+  var addLegBtn = h('button', { class: 'btn', type: 'button', text: '+ Aggiungi posizione', onclick: function () { if (legsState.length >= TJ.MAX_LEGS) return; var last = legsState[legsState.length - 1] || {}; legsState.push({ entry: '', size: '', sl: last.sl || '', tp: '', exit: '', reason: '', exitDate: '', exitTime: '' }); drawLegs(); fire(); } });
+  var legsHelp = h('p', { class: 'hint', text: 'Per ogni posizione indica entry, quantità, stop, take profit e dove l\'hai chiusa. I campi in alto (entry, quantità, stop, TP, uscita) diventano le medie pesate e il risultato è la somma di tutte le posizioni. Lascia vuota l\'uscita di una posizione ancora aperta: il trade resta aperto e non entra nelle statistiche.' });
+  var sLegs = h('fieldset', {}, h('legend', { text: 'Più posizioni (TP1, TP2…)' }),
+    h('label', { style: 'flex-direction:row;align-items:center;gap:8px;font-size:13px;color:var(--fg)' }, legsChk, 'Ho aperto più posizioni a prezzi diversi o chiuso in più punti'), legsHelp, legsBox, addLegBtn);
+  addLegBtn.hidden = !legsOn; legsHelp.hidden = !legsOn;
   var againBtn = existing ? null : h('button', { class: 'btn', type: 'button', text: 'Salva e nuovo', onclick: function () { again = true; form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true })); } });
   var hasAdv = ['exitDate', 'exitTime', 'market', 'session', 'tfEntry', 'tfHtf', 'account', 'sl', 'tp', 'swap', 'otherCosts', 'slippage', 'riskMoney', 'pnlGross', 'rDeclared', 'strategy', 'bias', 'condition', 'confirmations', 'macro', 'motivation', 'planBefore', 'noteAfter', 'emotionBefore', 'emotionDuring', 'emotionAfter', 'lesson', 'repeat', 'avoid', 'shotBefore', 'shotAfter', 'discipline', 'setupQuality'].some(function (k) { var v = base[k]; return v != null && v !== ''; }) || base.tags.length || base.mistakes.length || base.status === 'open';
   var adv = h('details', { class: 'adv', open: (existing && hasAdv) || restored ? 'open' : null }, h('summary', { text: 'Dettagli avanzati (facoltativi)' }), h('p', { class: 'hint', text: 'Prezzi, size, costi, strategia, screenshot, emozioni e psicologia. Non servono per salvare.' }), sGen, sExe, sTech, sDiary, sPsy);
   var draftInfo = h('span', { class: 'hint', 'aria-live': 'polite', style: 'margin-right:auto' });
   if (restored) form.appendChild(h('div', { class: 'banner' }, 'Ho ripristinato la bozza salvata automaticamente alle ' + new Date(restored).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' }) + '. ', h('button', { class: 'btn sm', type: 'button', text: 'Scarta bozza', onclick: function () { dropDraft(); finished = true; modal.close(); openTradeForm(id, template); } })));
-  [sQuick, live, adv].forEach(function (n) { form.appendChild(n); });
+  [sQuick, sLegs, live, adv].forEach(function (n) { form.appendChild(n); });
+  drawLegs(); lockTop(legsOn);
   form.appendChild(h('div', { class: 'stickybar' }, errBox, h('div', { class: 'row actions', style: 'justify-content:flex-end' }, draftInfo, cancel, againBtn, saveBtn)));
 
   function collect(commit) {
@@ -1637,21 +1763,37 @@ function openTradeForm(id, template) {
     ['date', 'entryTime', 'exitDate', 'exitTime', 'asset', 'market', 'session', 'tfEntry', 'tfHtf', 'account', 'strategy', 'bias', 'condition', 'confirmations', 'macro', 'motivation', 'planBefore', 'noteAfter', 'emotionBefore', 'emotionDuring', 'emotionAfter', 'lesson', 'repeat', 'avoid', 'notes', 'outcomeDeclared', 'pnlPrefer'].forEach(function (k) { raw[k] = F[k].get(); });
     NUMF.forEach(function (k) { var r = TJ.parseField(F[k].get()); if (r.invalid) invalid.push(k); raw[k] = r.value; });
     TJ.FLAGS.forEach(function (f) { raw.psych.flags[f[0]] = flagBoxes[f[0]].checked; });
-    committing = false; return { raw: raw, invalid: invalid };
+    var invalidLegs = [];
+    if (legsOn) {
+      raw.legs = legsState.map(function (L, i) {
+        var o = { reason: L.reason, exitDate: L.exitDate, exitTime: L.exitTime };
+        ['entry', 'size', 'sl', 'tp', 'exit'].forEach(function (k) { var r = TJ.parseField(L[k]); if (r.invalid) invalidLegs.push({ msg: 'Posizione ' + (i + 1) + ', ' + LEGLAB[k].toLowerCase() + ': inserisci un numero valido (esempio 1234,5).', el: legEls[i] && legEls[i][k] }); o[k] = r.value; });
+        return o;
+      });
+    }
+    committing = false; return { raw: raw, invalid: invalid, invalidLegs: invalidLegs };
   }
   function capitalFor() { return existing ? existing.d.capitalBefore : S.D.equityNow; }
   function updateLive() {
     var c = collect(), t = TJ.normalizeTrade(c.raw), d = TJ.derive(t, { capitalBefore: capitalFor(), beTol: S.settings.beTolMoney, beTolR: S.settings.beTolR });
     var v = TJ.validateTrade(t, d), warn = v.warnings.concat(limitWarnings(d.riskMoney, capitalFor(), t.date, existing ? existing.t.id : null));
+    if (legsOn) {
+      ['entry', 'size', 'sl', 'tp', 'exit'].forEach(function (k) { F[k].el.value = t[k] == null ? '' : String(t[k]); });
+      F.status.el.value = t.status;
+      legInfo.forEach(function (el, i) { var r = d.legRows[i]; if (!r) { el.textContent = ''; return; }
+        var parts = []; if (r.gross != null) parts.push('P&L lordo ' + money(r.gross, true)); if (r.r != null) parts.push('R ' + rfmt(r.r, true)); if (r.plannedR != null) parts.push('R pianificato ' + rfmt(r.plannedR)); if (r.hitTp) parts.push('TP raggiunto'); if (!r.closed) parts.push('ancora aperta');
+        el.textContent = parts.join(' · '); });
+    }
     var kv = [];
     function item(label, val, cls, src) { kv.push(h('span', {}, label + ': ', h('b', { class: 'num ' + (cls || ''), text: val }), src ? ' (' + src + ')' : '')); }
     if (d.riskMoney != null) item('Rischio', money(d.riskMoney), '', d.riskSource); if (d.riskPct != null) item('Rischio %', pct(d.riskPct, 2)); if (d.rPlanned != null) item('R pianificato', rfmt(d.rPlanned));
     if (d.calcGross != null) item('P&L lordo calcolato', money(d.calcGross, true), tone(d.calcGross));
     if (d.netEff != null) item('P&L netto', money(d.netEff, true), tone(d.netEff), d.netSource); if (d.rEff != null) item('R realizzato', rfmt(d.rEff, true), tone(d.rEff), d.rSource);
     if (d.pnlMismatch) item('Differenza dichiarato − calcolato', money(d.pnlDiff, true) + ' (dichiarato ' + money(d.netDeclared, true) + ', calcolato ' + money(d.calcNet, true) + ')', 'neg', 'in uso: ' + d.netSource);
+    if (legsOn && d.legsOpen) item('Posizioni aperte', d.legsOpen + ' su ' + t.legs.length + (d.legRealizedGross != null ? ' · già incassato ' + money(d.legRealizedGross, true) : ''));
     item('Esito', OUT_LABEL[d.outcome]);
     var qe = F.entry.get().trim(), qx = F.exit.get().trim(), qs = F.size.get().trim(), qp = F.pnlNet.get().trim(), qv = F.pointValue.get().trim(), prices = qe && qx && qs;
-    pvField.hidden = !(prices && (!qp || qv));
+    pvField.hidden = !(legsOn || (prices && (!qp || qv)));
     clear(live); if (prices && !qp && !qv && d.netEff == null) live.appendChild(h('p', { class: 'hint warn', style: 'margin:0 0 6px', text: 'Mancano informazioni per calcolare il risultato: indica il valore per punto del tuo strumento qui sopra, oppure scrivi il risultato netto a mano (verrà segnato come "dichiarato", mai come calcolato).' }));
     if (kv.length > 1) live.appendChild(h('div', { class: 'kv' }, kv)); else live.appendChild(h('p', { class: 'hint', style: 'margin:0', text: 'Con prezzi, quantità e valore del punto (Dettagli avanzati) rischio, R e P&L si calcolano da soli. Se scrivi il risultato netto, viene usato quello.' }));
     if (d.riskPct == null && d.riskMoney != null && capitalFor() == null) live.appendChild(h('p', { class: 'hint', text: 'Per il rischio % imposta il capitale iniziale in Risk Management.' }));
@@ -1676,6 +1818,7 @@ function openTradeForm(id, template) {
     ev.preventDefault(); errBox.textContent = ''; Object.keys(F).forEach(function (k) { if (F[k].el.removeAttribute) F[k].el.removeAttribute('aria-invalid'); });
     var c = collect(true), errs = [];
     c.invalid.forEach(function (k) { errs.push(NUMLABEL[k] + ': inserisci un numero valido (esempio 1234,5).'); F[k].el.setAttribute('aria-invalid', 'true'); });
+    (c.invalidLegs || []).forEach(function (x) { errs.push(x.msg); if (x.el) x.el.setAttribute('aria-invalid', 'true'); });
     var t = TJ.normalizeTrade(c.raw), d = TJ.derive(t, { capitalBefore: capitalFor() }), v = TJ.validateTrade(t, d); errs = errs.concat(v.errors);
     if (errs.length) { clear(errBox); errs.forEach(function (m) { errBox.appendChild(h('div', { text: '• ' + m })); }); var bad = form.querySelector('[aria-invalid=true]') || (!t.direction ? form.querySelector('.seg') : null) || (!t.asset ? F.asset.el : null);
       if (bad) { if (bad.scrollIntoView) bad.scrollIntoView({ block: 'center' }); if (bad.classList) bad.classList.add('flash'); var fe = bad.matches && bad.matches('input,select,textarea') ? bad : bad.querySelector && bad.querySelector('button,input'); if (fe && fe.focus) try { fe.focus({ preventScroll: true }); } catch (e2) {} }
