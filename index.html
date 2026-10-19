@@ -892,7 +892,7 @@ var TJ = (function () {
       if (ids[t.id]) { errors.push('Trade #' + (i + 1) + ' scartato: ID duplicato nel file.'); return; }
       ids[t.id] = 1; out.trades.push(t);
     });
-    out.reviews = (Array.isArray(obj.reviews) ? obj.reviews : []).filter(function (r) { return r && typeof r.key === 'string'; }).map(function (r) { return { key: r.key, kind: str(r.kind), date: str(r.date), lessons: str(r.lessons), goals: str(r.goals), notes: str(r.notes), updatedAt: num(r.updatedAt) || Date.now() }; });
+    out.reviews = (Array.isArray(obj.reviews) ? obj.reviews : []).filter(function (r) { return r && typeof r.key === 'string'; }).map(function (r) { return { key: r.key, kind: str(r.kind), date: str(r.date), title: str(r.title), lessons: str(r.lessons), goals: str(r.goals), notes: str(r.notes), updatedAt: num(r.updatedAt) || Date.now() }; });
     out.settings = obj.settings && typeof obj.settings === 'object' ? obj.settings : null;
     out.attachments = (Array.isArray(obj.attachments) ? obj.attachments : []).filter(function (a) { return a && typeof a.id === 'string' && /^data:image\//.test(a.dataUrl || ''); });
     return { ok: true, errors: errors, data: out };
@@ -2478,8 +2478,9 @@ function viewBackup() {
       h('label', { class: 'row', style: 'gap:6px' }, dc, 'Decimali con la virgola (Excel italiano)'), h('button', { class: 'btn', type: 'button', text: 'Importa CSV…', onclick: function () { fileC.click(); } }), fileC),
     h('p', { class: 'hint', text: 'Separatore ";" con BOM UTF-8. Le colonne calc_R, calc_net ed esito sono calcolate e ignorate in importazione. Le celle di testo che iniziano con = + - @ sono protette contro l\'iniezione di formule. Il CSV non contiene gli screenshot.' })));
   var m = TJ.computeMetrics(S.D.items, { startEquity: S.D.initialCapital || 0 });
-  var rv = Object.keys(S.reviews).length;
-  root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Riepilogo stampabile' }), kvRows(metricRows(m)), h('p', { class: 'note', text: S.trades.length + ' trade registrati, ' + rv + ' revisioni.' }), h('div', { class: 'row noprint' }, h('button', { class: 'btn', type: 'button', text: 'Stampa / salva come PDF', onclick: function () { window.print(); } }))));
+  var rvAll = Object.keys(S.reviews).map(function (k) { return S.reviews[k]; });
+  var rvNotes = rvAll.filter(isNoteRec).length, rv = rvAll.length - rvNotes;
+  root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Riepilogo stampabile' }), kvRows(metricRows(m)), h('p', { class: 'note', text: S.trades.length + ' trade registrati, ' + rv + ' revisioni, ' + rvNotes + ' appunti.' }), h('div', { class: 'row noprint' }, h('button', { class: 'btn', type: 'button', text: 'Stampa / salva come PDF', onclick: function () { window.print(); } }))));
   root.appendChild(h('div', { class: 'card danger-zone', style: 'margin-top:12px;border-color:var(--neg)' }, h('h2', { text: 'Zona pericolosa' }), h('p', { class: 'note', text: 'Elimina definitivamente tutti i trade, le revisioni, gli screenshot e le impostazioni da questo browser.' }),
     h('button', { class: 'btn danger', type: 'button', text: 'Elimina tutti i dati…', onclick: function () {
       var delTombs = Object.assign({}, S.settings.tombs), delTs = Date.now(); S.trades.forEach(function (t) { delTombs['t:' + t.id] = delTs; }); Object.keys(S.reviews).forEach(function (k) { delTombs['r:' + k] = delTs; });
@@ -2523,7 +2524,139 @@ function viewSettings() {
   root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Archiviazione' }), info, persistBtn, h('p', { class: 'hint', text: (S.sync && S.sync.cfg) ? 'Sincronizzazione attiva: i dati vengono copiati anche nell\'archivio online collegato al tuo account (dettagli in Report e backup).' : 'Nessun dato lascia il tuo dispositivo finché non attivi l\'account di sincronizzazione (Report e backup → Sincronizzazione).' })));
   return root;
 }
-var NAV = [['dashboard', 'Dashboard', viewDashboard], ['journal', 'Trade Journal', viewJournal], ['analytics', 'Analytics', viewAnalytics], ['risk', 'Risk Management', viewRisk], ['strategies', 'Strategie e setup', viewStrategies], ['psychology', 'Diario psicologico', viewPsychology], ['calendar', 'Calendario', viewCalendar], ['backup', 'Report e backup', viewBackup], ['settings', 'Impostazioni', viewSettings]];
+
+/* Appunti: testo libero, non legato ai trade. Usa lo stesso archivio delle revisioni
+   (store "reviews", chiave note:<id>), così entra da sola in backup e sincronizzazione. */
+function isNoteRec(r) { return !!r && r.kind === 'note'; }
+function noteTitleOf(r) {
+  var t = (r.title || '').trim(); if (t) return t;
+  var b = (r.notes || '').trim(); if (!b) return 'Senza titolo';
+  var first = b.split('\n')[0].trim();
+  return first.length > 60 ? first.slice(0, 60) + '…' : (first || 'Senza titolo');
+}
+function viewNotes() {
+  var N = S.notes = S.notes || { editing: null, q: '' };
+  var root = h('div'), listBox = h('div');
+
+  function records() {
+    var arr = Object.keys(S.reviews).map(function (k) { return S.reviews[k]; }).filter(isNoteRec);
+    if (N.editing && !S.reviews[N.editing.key]) arr.push(N.editing);
+    arr.sort(function (a, b) {
+      var da = a.date || '', db = b.date || '';
+      if (da !== db) return da < db ? 1 : -1;
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    });
+    return arr;
+  }
+  function matches(r) {
+    var q = (N.q || '').trim().toLowerCase(); if (!q) return true;
+    return ((r.title || '') + ' ' + (r.notes || '')).toLowerCase().indexOf(q) >= 0;
+  }
+  function startNew() {
+    if (S.pendingFlush) S.pendingFlush();
+    N.editing = { key: 'note:' + TJ.newId(), kind: 'note', date: TJ.todayStr(), title: '', notes: '', lessons: '', goals: '', updatedAt: 0 };
+    paint(true);
+  }
+  function openNote(r) { if (S.pendingFlush) S.pendingFlush(); N.editing = r; paint(true); }
+  function closeEditor() { if (S.pendingFlush) S.pendingFlush(); N.editing = null; paint(); }
+  function removeNote(r) {
+    askConfirm({ title: 'Eliminare l\'appunto?', message: 'L\'appunto "' + noteTitleOf(r) + '" verrà eliminato. Non si può annullare.', confirmLabel: 'Elimina', danger: true }).then(function (yes) {
+      if (!yes) return;
+      if (S.pendingFlush) { S.pendingFlush(); }
+      var existed = !!S.reviews[r.key];
+      delete S.reviews[r.key];
+      if (N.editing && N.editing.key === r.key) N.editing = null;
+      if (existed) {
+        S.settings.tombs['r:' + r.key] = Date.now();
+        dbSafe(function () { return TJDB.del('reviews', r.key).then(function () { return TJDB.put('settings', S.settings); }); });
+      }
+      toast('Appunto eliminato.');
+      paint();
+    });
+  }
+
+  function editorCard(rec) {
+    var dateEl = h('input', { class: 'f', type: 'date', value: rec.date || TJ.todayStr(), name: 'note-date', 'aria-label': 'Data dell\'appunto' });
+    var titleEl = h('input', { class: 'f', type: 'text', maxlength: '120', autocomplete: 'off', placeholder: 'Titolo (facoltativo)', value: rec.title || '', name: 'note-title' });
+    var bodyEl = h('textarea', { class: 'f', rows: '12', maxlength: '20000', placeholder: 'Scrivi quello che vuoi…', name: 'note-body' });
+    bodyEl.value = rec.notes || '';
+    var state = h('span', { class: 'hint', 'aria-live': 'polite', text: rec.updatedAt ? 'Salvato · ' + new Date(rec.updatedAt).toLocaleString('it-IT') : 'Si salva da solo mentre scrivi.' });
+    var timer = null;
+    function flush() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      S.pendingFlush = null;
+      var title = titleEl.value, body = bodyEl.value, existed = !!S.reviews[rec.key];
+      if (!title.trim() && !body.trim()) {
+        if (existed) {
+          delete S.reviews[rec.key];
+          S.settings.tombs['r:' + rec.key] = Date.now();
+          dbSafe(function () { return TJDB.del('reviews', rec.key).then(function () { return TJDB.put('settings', S.settings); }); });
+        }
+        state.textContent = 'Appunto vuoto: non viene salvato.';
+        return;
+      }
+      var r = { key: rec.key, kind: 'note', date: dateEl.value || TJ.todayStr(), title: title, notes: body, lessons: '', goals: '', updatedAt: Date.now() };
+      rec.date = r.date; rec.title = r.title; rec.notes = r.notes; rec.updatedAt = r.updatedAt;
+      S.reviews[r.key] = r;
+      dbSafe(function () { return TJDB.put('reviews', r); }).then(function (ok) {
+        state.textContent = ok ? 'Salvato alle ' + new Date(r.updatedAt).toLocaleTimeString('it-IT') : 'ERRORE: appunto non salvato. Esporta un backup.';
+      });
+    }
+    function sched() { clearTimeout(timer); timer = setTimeout(flush, 700); S.pendingFlush = flush; }
+    titleEl.addEventListener('input', sched);
+    bodyEl.addEventListener('input', sched);
+    dateEl.addEventListener('change', sched);
+    return h('div', { class: 'card' },
+      h('div', { class: 'row' },
+        h('label', { style: 'flex:0 0 160px' }, 'Data', dateEl),
+        h('label', { style: 'flex:1 1 220px' }, 'Titolo', titleEl)),
+      h('label', { style: 'display:block;margin-top:8px' }, 'Testo', bodyEl),
+      h('div', { class: 'row', style: 'margin-top:8px;align-items:center' },
+        h('button', { class: 'btn primary', type: 'button', text: 'Chiudi', onclick: closeEditor }),
+        h('button', { class: 'btn danger', type: 'button', text: 'Elimina', onclick: function () { removeNote(rec); } }),
+        state));
+  }
+
+  function noteCard(r) {
+    var body = (r.notes || '').trim(), excerpt = body.length > 200 ? body.slice(0, 200) + '…' : body;
+    return h('div', { class: 'card' },
+      h('div', { class: 'row', style: 'justify-content:space-between;align-items:baseline' },
+        h('b', { text: noteTitleOf(r) }),
+        h('span', { class: 'hint', text: TJ.fmtDate(r.date) })),
+      excerpt ? h('p', { style: 'white-space:pre-line;margin:6px 0 0;color:var(--dim)', text: excerpt }) : h('p', { class: 'note', text: '(nessun testo)' }),
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        h('button', { class: 'btn sm', type: 'button', text: 'Apri', onclick: function () { openNote(r); } }),
+        h('button', { class: 'btn sm danger', type: 'button', text: 'Elimina', onclick: function () { removeNote(r); } })));
+  }
+
+  function paint(focus) {
+    clear(listBox);
+    var all = records(), shown = all.filter(matches);
+    if (N.editing) listBox.appendChild(editorCard(N.editing));
+    var rest = shown.filter(function (r) { return !N.editing || r.key !== N.editing.key; });
+    if (!rest.length && !N.editing) {
+      listBox.appendChild(emptyBox(
+        all.length ? 'Nessun appunto corrisponde alla ricerca.' : 'Non hai ancora scritto nessun appunto.',
+        all.length ? null : 'Scrivi il primo appunto', startNew));
+      return;
+    }
+    rest.forEach(function (r) { listBox.appendChild(noteCard(r)); });
+    if (focus) { try { var t = listBox.querySelector('textarea[name="note-body"]'); if (t) t.focus(); } catch (e) {} }
+  }
+
+  var searchEl = h('input', { class: 'f', type: 'search', autocomplete: 'off', placeholder: 'Cerca negli appunti…', value: N.q || '', name: 'note-q', 'aria-label': 'Cerca negli appunti' });
+  searchEl.addEventListener('input', function () { N.q = searchEl.value; paint(); });
+  root.appendChild(h('div', { class: 'card' },
+    h('h2', { text: 'Appunti' }),
+    h('p', { class: 'note', text: 'Spazio libero per scrivere quello che vuoi: idee, regole, pensieri, cose da ricordare. Non è legato ai trade. Si salva da solo mentre scrivi ed entra nei backup e nella sincronizzazione.' }),
+    h('div', { class: 'row', style: 'margin-top:8px' },
+      h('button', { class: 'btn primary', type: 'button', text: '+ Nuovo appunto', onclick: startNew }),
+      searchEl)));
+  root.appendChild(listBox);
+  paint();
+  return root;
+}
+var NAV = [['dashboard', 'Dashboard', viewDashboard], ['journal', 'Trade Journal', viewJournal], ['analytics', 'Analytics', viewAnalytics], ['risk', 'Risk Management', viewRisk], ['strategies', 'Strategie e setup', viewStrategies], ['psychology', 'Diario psicologico', viewPsychology], ['notes', 'Appunti', viewNotes], ['calendar', 'Calendario', viewCalendar], ['backup', 'Report e backup', viewBackup], ['settings', 'Impostazioni', viewSettings]];
 function navTo(r) {
   if (!NAV.some(function (n) { return n[0] === r; })) r = 'dashboard';
   S.route = r; try { if (location.hash !== '#/' + r) history.replaceState(null, '', '#/' + r); } catch (e) { /* alcuni browser/app bloccano la cronologia: la navigazione funziona comunque */ }
