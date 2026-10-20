@@ -369,7 +369,7 @@ var TJ = (function () {
     d.netDeclared = t.pnlNet; d.netPreferred = t.pnlPrefer === 'calcolato' && d.calcNet != null ? 'calcolato' : 'dichiarato';
     if (t.pnlNet != null && d.netPreferred === 'dichiarato') { d.netEff = t.pnlNet; d.netSource = 'dichiarato'; }
     else if (d.calcNet != null) { d.netEff = d.calcNet; d.netSource = 'calcolato'; }
-    else if (t.pnlGross != null && d.costsEntered) { d.netEff = round(t.pnlGross - d.costs, 8); d.netSource = 'calcolato'; }  // lordo dichiarato − costi inseriti
+    else if (t.pnlGross != null) { d.netEff = round(t.pnlGross - d.costs, 8); d.netSource = d.costsEntered ? 'calcolato' : 'dichiarato'; }  // lordo dichiarato − costi inseriti (senza costi, il lordo è già il netto)
     else { d.netEff = null; d.netSource = null; }
     if (t.pnlGross != null) { d.grossEff = t.pnlGross; d.grossSource = 'dichiarato'; }
     else if (d.calcGross != null) { d.grossEff = d.calcGross; d.grossSource = 'calcolato'; }
@@ -865,7 +865,7 @@ var TJ = (function () {
     if (d) d.issues.forEach(function (i) { if (i.code === 'durata_negativa') e.push(i.msg); else w.push(i.msg); });
     ['commissions', 'swap', 'otherCosts'].forEach(function (k) { if (t[k] != null && t[k] < 0) w.push('Un costo negativo viene trattato come rimborso.'); });
     if (t.date && t.date > todayStr()) w.push('La data è nel futuro.');
-    if (t.status === 'closed' && t.exit == null && t.pnlNet == null && t.rDeclared == null && !t.outcomeDeclared) w.push('Trade chiuso senza uscita né P&L: verrà escluso dalle statistiche.');
+    if (t.status === 'closed' && t.exit == null && t.pnlNet == null && t.pnlGross == null && t.rDeclared == null && !t.outcomeDeclared) w.push('Trade chiuso senza uscita né P&L: verrà escluso dalle statistiche.');
     return { errors: e, warnings: w.filter(function (x, i, a) { return a.indexOf(x) === i; }) };
   }
 
@@ -1669,9 +1669,12 @@ function openTradeForm(id, template) {
   var sQuick = h('div', { class: 'quick' }, h('div', { class: 'fgrid' },
     wrap('Data *', dateEl), txt('entryTime', 'Ora', { type: 'time' }), h('div', { class: 's2' }, wrap('Strumento *', assetEl), assetChips),
     h('div', { class: 's2' }, wrap('Direzione *', dirBtns)), txt('size', 'Quantità / size', { num: true }),
-    txt('entry', 'Prezzo di entrata', { num: true }), txt('exit', 'Prezzo di uscita', { num: true }), txt('commissions', 'Commissioni', { num: true }),
+    txt('entry', 'Prezzo di entrata', { num: true }), txt('exit', 'Prezzo di uscita', { num: true }),
+    txt('pnlGross', 'Profitto lordo (prima dei costi)', { num: true, hint: 'Il "Profitto" che vedi sul broker, prima di commissioni e swap. Quei costi vengono tolti da soli.' }),
+    txt('commissions', 'Commissioni', { num: true, hint: 'Scrivila come numero positivo: viene sottratta dal profitto lordo.' }),
+    txt('swap', 'Swap', { num: true, hint: 'Costo della notte. Se il broker lo scrive col segno +, lascialo positivo solo se l\'hai incassato.' }),
     pvField,
-    h('div', { class: 's2' }, h('label', {}, 'Risultato netto (P&L reale)', h('span', { class: 'row', style: 'flex-wrap:nowrap' }, pnlEl, signBtn), h('span', { class: 'hint', id: 'pnl-hint', text: 'Dal broker, dopo i costi: se lo scrivi, resta quello. Se lo lasci vuoto lo calcolo da prezzi, quantità e valore per punto, quando ci sono tutti.' }))),
+    h('div', { class: 's2' }, h('label', {}, 'Risultato netto (P&L reale)', h('span', { class: 'row', style: 'flex-wrap:nowrap' }, pnlEl, signBtn), h('span', { class: 'hint', id: 'pnl-hint', text: 'Da compilare solo se hai già il netto finale: se lo scrivi, vince su tutto e i costi non vengono tolti una seconda volta. Lascialo vuoto e il netto si calcola da solo, dal profitto lordo meno i costi oppure dai prezzi.' }))),
     h('div', { class: 's4' }, tagInput('tags', 'Tag (liberi: scrivi #breakout, #fomo… e premi Invio)', base.tags, tagSug, 'Puoi usare tag già esistenti o crearne di nuovi. Anche gli #hashtag scritti nelle note contano come tag.')),
     h('div', { class: 's4' }, wrap('Note', notesEl, { hint: null }), tagHint)));
   var sGen = h('fieldset', {}, h('legend', { text: 'Altre informazioni generali' }), h('div', { class: 'fgrid' },
@@ -1681,10 +1684,10 @@ function openTradeForm(id, template) {
     txt('session', 'Sessione', { list: 'dl-sess', ph: 'London, New York AM…', hint: 'Campo libero: puoi usare una sessione personalizzata' }), txt('tfEntry', 'Timeframe di ingresso', { list: 'dl-tf' }), txt('tfHtf', 'Timeframe di analisi superiore', { list: 'dl-tf' }), txt('account', 'Broker / conto', {})), dlAssets, dlSess, dlTf);
   var live = h('div', { class: 'live', 'aria-live': 'polite' });
   var sExe = h('fieldset', {}, h('legend', { text: 'Rischio ed esecuzione' }), h('div', { class: 'fgrid' },
-    txt('sl', 'Stop loss iniziale', { num: true }), txt('tp', 'Take profit pianificato', { num: true }), txt('swap', 'Swap', { num: true }), txt('otherCosts', 'Altri costi', { num: true }), txt('slippage', 'Slippage', { num: true, hint: 'Solo informativo: è già incluso nei prezzi' }),
+    txt('sl', 'Stop loss iniziale', { num: true }), txt('tp', 'Take profit pianificato', { num: true }), txt('otherCosts', 'Altri costi', { num: true }), txt('slippage', 'Slippage', { num: true, hint: 'Solo informativo: è già incluso nei prezzi' }),
     txt('riskMoney', 'Rischio monetario iniziale', { num: true, hint: 'Vuoto = calcolato da entry, stop e valore per punto' })),
-    h('details', { style: 'margin-top:10px', open: (base.pnlGross != null || base.rDeclared != null || base.outcomeDeclared || base.pnlPrefer) ? 'open' : null }, h('summary', { text: 'Valori dichiarati manualmente (avanzato)' }),
-      h('div', { class: 'fgrid', style: 'margin-top:8px' }, txt('pnlGross', 'P&L lordo dichiarato', { num: true }), txt('rDeclared', 'R dichiarato', { num: true, hint: 'Usato solo se l\'R non è calcolabile dai prezzi' }), sel('outcomeDeclared', 'Esito dichiarato', [['', '—'], ['win', 'Win'], ['loss', 'Loss'], ['be', 'Break-even']], { hint: 'Usato solo se mancano sia P&L sia R' }), sel('pnlPrefer', 'Se P&L dichiarato e calcolato differiscono, usa', [['', 'Il dichiarato (broker)'], ['calcolato', 'Il calcolato (da prezzi)']], { hint: 'Entrambi i valori restano salvati; la differenza è sempre mostrata.' }))));
+    h('details', { style: 'margin-top:10px', open: (base.rDeclared != null || base.outcomeDeclared || base.pnlPrefer) ? 'open' : null }, h('summary', { text: 'Valori dichiarati manualmente (avanzato)' }),
+      h('div', { class: 'fgrid', style: 'margin-top:8px' }, txt('rDeclared', 'R dichiarato', { num: true, hint: 'Usato solo se l\'R non è calcolabile dai prezzi' }), sel('outcomeDeclared', 'Esito dichiarato', [['', '—'], ['win', 'Win'], ['loss', 'Loss'], ['be', 'Break-even']], { hint: 'Usato solo se mancano sia P&L sia R' }), sel('pnlPrefer', 'Se P&L dichiarato e calcolato differiscono, usa', [['', 'Il dichiarato (broker)'], ['calcolato', 'Il calcolato (da prezzi)']], { hint: 'Entrambi i valori restano salvati; la differenza è sempre mostrata.' }))));
   
   var shots = { before: { id: base.shotBefore, url: null, changed: false }, after: { id: base.shotAfter, url: null, changed: false } };
   function shotField(slot, label) {
