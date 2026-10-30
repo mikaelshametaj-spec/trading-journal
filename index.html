@@ -170,6 +170,12 @@ details.card>summary{cursor:pointer;font-weight:600}
 .legend i.lp{background:var(--posbg);border:1px solid rgba(63,178,127,.6)} .legend i.ln{background:var(--negbg);border:1px solid rgba(224,98,90,.6)} .legend i.lz{background:var(--panel);border:1px dashed var(--dim)} .legend i.l0{background:var(--panel);border:1px solid var(--border)}
 @media (max-width:520px){ .day .v{font-size:10px;letter-spacing:-.3px;white-space:nowrap} .day{padding:3px 2px} .day .d{font-size:10.5px} .wkcell .v{font-size:10.5px} .cal{gap:3px} }
 dl.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:2px 18px;margin-top:10px} dl.kv dt{font-weight:400;color:var(--dim);margin-top:6px} dl.kv dd{margin:0;color:var(--text);font-weight:600}
+.pbar{height:10px;border-radius:999px;background:var(--border);overflow:hidden;margin:7px 0 4px}
+.pbar i{display:block;height:100%;border-radius:999px;background:var(--gold);transition:width .2s}
+.pbar i.done{background:var(--pos)} .pbar i.bad{background:var(--neg)}
+.lim{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:7px 0;border-top:1px solid var(--border);flex-wrap:wrap}
+.lim .ln{color:var(--dim)} .lim .lv{font-weight:600;text-align:right}
+.acchead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
 [hidden]{display:none!important}
 
 /* v3 mobile: barra di navigazione in basso */
@@ -749,6 +755,7 @@ var TJ = (function () {
       var t = x.t, d = x.d;
       if (f.from && t.date < f.from) return false; if (f.to && t.date > f.to) return false;
       if (f.asset && t.asset !== f.asset) return false; if (f.market && t.market !== f.market) return false;
+      if (f.account && t.account !== f.account) return false;
       if (f.strategy && t.strategy !== f.strategy) return false; if (f.session && t.session !== f.session) return false;
       if (f.direction && t.direction !== f.direction) return false; if (f.tf && t.tfEntry !== f.tf) return false;
       if (f.outcome && d.outcome !== f.outcome) return false; if (f.issuesOnly && !d.issues.length) return false;
@@ -897,9 +904,118 @@ var TJ = (function () {
     out.attachments = (Array.isArray(obj.attachments) ? obj.attachments : []).filter(function (a) { return a && typeof a.id === 'string' && /^data:image\//.test(a.dataUrl || ''); });
     return { ok: true, errors: errors, data: out };
   }
+
+  /* Conti: reale, demo oppure prop firm con una o più fasi.
+     Il conto è identificato dal nome, che è quello scritto nel campo "Conto" dei trade. */
+  var ACCOUNT_KINDS = [['real', 'Reale'], ['demo', 'Demo'], ['prop', 'Prop firm']];
+  var DD_TYPES = [['static', 'Fissa (sul saldo iniziale)'], ['trailing', 'Trailing (sul massimo raggiunto)']];
+  function normalizeAccount(a) {
+    a = a || {};
+    var kind = ['real', 'demo', 'prop'].indexOf(a.kind) >= 0 ? a.kind : 'real';
+    var steps = Math.floor(num(a.steps) || 0); if (!(steps >= 0)) steps = 0; if (steps > 3) steps = 3;
+    if (kind !== 'prop') steps = 0;
+    var o = {
+      id: str(a.id) || newId(),
+      name: str(a.name),
+      kind: kind,
+      capital: num(a.capital),
+      startDate: parseDate(str(a.startDate)) ? str(a.startDate) : '',
+      steps: steps,
+      targets: [],
+      dailyLossPct: num(a.dailyLossPct),
+      maxLossPct: num(a.maxLossPct),
+      ddType: a.ddType === 'trailing' ? 'trailing' : 'static',
+      minDays: null,
+      profitSplit: num(a.profitSplit),
+      note: str(a.note),
+      archived: !!a.archived,
+      updatedAt: num(a.updatedAt) || 0
+    };
+    var tg = Array.isArray(a.targets) ? a.targets : [];
+    for (var i = 0; i < steps; i++) o.targets.push(num(tg[i]));
+    var md = num(a.minDays); if (md != null) o.minDays = Math.max(0, Math.floor(md));
+    // fase: da 1 a steps sono le fasi di valutazione, steps+1 vuol dire "conto finanziato"
+    var ph = Math.floor(num(a.phase) || 0);
+    if (kind !== 'prop') o.phase = 0;
+    else { if (!(ph >= 1)) ph = 1; if (ph > steps + 1) ph = steps + 1; o.phase = ph; }
+    return o;
+  }
+  function normalizeAccounts(arr) {
+    if (!Array.isArray(arr)) return [];
+    var seen = {}, out = [];
+    arr.forEach(function (a) {
+      var o = normalizeAccount(a);
+      if (!o.name || seen[o.id]) return;
+      seen[o.id] = 1; out.push(o);
+    });
+    return out;
+  }
+  function accountPhaseLabel(a) {
+    if (a.kind !== 'prop') return a.kind === 'demo' ? 'Demo' : 'Reale';
+    if (a.steps === 0) return 'Finanziato (diretta)';
+    if (a.phase > a.steps) return 'Finanziato';
+    return 'Fase ' + a.phase + ' di ' + a.steps;
+  }
+  /* Stato di un conto a partire dai suoi trade (items = [{t, d}]). */
+  function accountStatus(a, items, ctx) {
+    a = normalizeAccount(a); ctx = ctx || {};
+    var today = ctx.today || todayStr();
+    var rows = (items || []).filter(function (x) {
+      return x.d.valid && x.d.netEff != null && (!a.startDate || x.t.date >= a.startDate);
+    }).slice().sort(chronoCmp);
+    var net = rows.length ? round(sum(rows.map(function (x) { return x.d.netEff; })), 8) : 0;
+    var st = { account: a, n: rows.length, net: net, capital: a.capital, phaseLabel: accountPhaseLabel(a) };
+    st.equity = a.capital != null ? round(a.capital + net, 8) : null;
+    st.netPct = a.capital ? round(net / a.capital * 100, 6) : null;
+
+    // giorni in cui si è operato
+    var byDay = {};
+    rows.forEach(function (x) { byDay[x.t.date] = round((byDay[x.t.date] || 0) + x.d.netEff, 8); });
+    var dayKeys = Object.keys(byDay).sort();
+    st.daysTraded = dayKeys.length;
+    st.minDays = a.minDays;
+    st.daysLeft = a.minDays != null ? Math.max(0, a.minDays - st.daysTraded) : null;
+    st.todayNet = byDay[today] == null ? 0 : byDay[today];
+    st.worstDay = null; st.worstDayDate = '';
+    dayKeys.forEach(function (k) { if (st.worstDay == null || byDay[k] < st.worstDay) { st.worstDay = byDay[k]; st.worstDayDate = k; } });
+
+    // obiettivo della fase in corso
+    st.funded = a.kind !== 'prop' || a.steps === 0 || a.phase > a.steps;
+    st.targetPct = (a.kind === 'prop' && !st.funded) ? a.targets[a.phase - 1] : null;
+    st.targetMoney = (st.targetPct != null && a.capital != null) ? round(a.capital * st.targetPct / 100, 8) : null;
+    st.remaining = st.targetMoney != null ? round(Math.max(0, st.targetMoney - net), 8) : null;
+    st.progressPct = (st.targetMoney != null && st.targetMoney > 0) ? round(net / st.targetMoney * 100, 4) : null;
+    st.targetReached = st.targetMoney != null && net >= st.targetMoney;
+    st.canPass = st.targetReached && (st.daysLeft == null || st.daysLeft === 0);
+
+    // perdita massima giornaliera
+    st.dailyLimit = (a.dailyLossPct != null && a.capital != null) ? round(a.capital * a.dailyLossPct / 100, 8) : null;
+    st.dailyUsed = Math.max(0, -st.todayNet);
+    st.dailyLeft = st.dailyLimit != null ? round(Math.max(0, st.dailyLimit - st.dailyUsed), 8) : null;
+    st.dailyBreached = st.dailyLimit != null && st.worstDay != null && -st.worstDay >= st.dailyLimit;
+
+    // perdita massima complessiva, fissa o trailing
+    st.maxLoss = null; st.floor = null; st.maxLeft = null; st.worstDd = null; st.peak = null; st.maxBreached = false;
+    if (a.maxLossPct != null && a.capital != null) {
+      var cap = round(a.capital * a.maxLossPct / 100, 8), eq = a.capital, peak = a.capital, worst = 0;
+      rows.forEach(function (x) {
+        eq = round(eq + x.d.netEff, 8);
+        if (eq > peak) peak = eq;
+        var ref = a.ddType === 'trailing' ? peak : a.capital, dd = ref - eq;
+        if (dd > worst) worst = dd;
+      });
+      st.maxLoss = cap; st.peak = peak; st.worstDd = round(worst, 8);
+      st.floor = round((a.ddType === 'trailing' ? peak : a.capital) - cap, 8);
+      st.maxLeft = st.equity != null ? round(st.equity - st.floor, 8) : null;
+      st.maxBreached = worst >= cap;
+    }
+    st.blown = st.dailyBreached || st.maxBreached;
+    return st;
+  }
+
   var DEFAULT_SETTINGS = { key: 'main', tombs: {}, settingsAt: 0, currency: 'EUR', initialCapital: null, maxRiskPct: null, maxConsecLosses: null, dailyLossPct: null, weeklyLossPct: null, maxDrawdownPct: null, targetRR: null, beTolMoney: 0, beTolR: 0,
     concepts: ['Liquidity sweep', 'FVG', 'Order Block', 'BOS', 'CHoCH', 'OTE', 'Premium/Discount', 'Killzone'], sessions: ['Asia', 'London', 'New York AM', 'New York PM'],
-    timeframes: ['M1', 'M3', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1'], markets: ['Forex', 'Indici', 'Metalli', 'Crypto', 'Azioni', 'Altro'], strategies: [], instruments: {}, lastBackupAt: null, lastUsed: {} };
+    timeframes: ['M1', 'M3', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1'], markets: ['Forex', 'Indici', 'Metalli', 'Crypto', 'Azioni', 'Altro'], strategies: [], instruments: {}, accounts: [], lastBackupAt: null, lastUsed: {} };
   function normalizeSettings(s) {
     var o = Object.assign({}, DEFAULT_SETTINGS, s || {});
     ['initialCapital', 'maxRiskPct', 'dailyLossPct', 'weeklyLossPct', 'maxDrawdownPct', 'targetRR', 'maxConsecLosses'].forEach(function (k) { o[k] = num(o[k]); }); if (o.maxConsecLosses != null) o.maxConsecLosses = Math.floor(o.maxConsecLosses);
@@ -907,12 +1023,14 @@ var TJ = (function () {
     ['concepts', 'sessions', 'timeframes', 'markets', 'strategies'].forEach(function (k) { o[k] = uniqStrings(o[k]); });
     var tb = {}; if (o.tombs && typeof o.tombs === 'object' && !Array.isArray(o.tombs)) Object.keys(o.tombs).forEach(function (k) { var v = num(o.tombs[k]); if (v != null && /^[tr]:/.test(k)) tb[k] = v; }); o.tombs = tb; o.settingsAt = num(o.settingsAt) || 0;
     o.instruments = (o.instruments && typeof o.instruments === 'object') ? o.instruments : {};
+    o.accounts = normalizeAccounts(o.accounts);
     o.lastUsed = (o.lastUsed && typeof o.lastUsed === 'object' && !Array.isArray(o.lastUsed)) ? o.lastUsed : {};
     o.key = 'main'; o.currency = str(o.currency).toUpperCase() || 'EUR';
     return o;
   }
   return { SCHEMA_VERSION: SCHEMA_VERSION, APP_ID: APP_ID, FLAGS: FLAGS, CSV_COLS: CSV_COLS, EPS: EPS, num: num, parseField: parseField, sum: sum, mean: mean, round: round,
-    parseDate: parseDate, parseTime: parseTime, dayNum: dayNum, fromDayNum: fromDayNum, addDays: addDays, weekdayMon: weekdayMon, weekStart: weekStart, minutes: minutes, todayStr: todayStr, fmtDate: fmtDate, lastDayOfMonth: lastDayOfMonth, newId: newId, resolvePeriod: resolvePeriod, hashtags: hashtags, periodRange: periodRange,
+    parseDate: parseDate, parseTime: parseTime, dayNum: dayNum, fromDayNum: fromDayNum, addDays: addDays, weekdayMon: weekdayMon, weekStart: weekStart, minutes: minutes, todayStr: todayStr, fmtDate: fmtDate, lastDayOfMonth: lastDayOfMonth, newId: newId,
+    ACCOUNT_KINDS: ACCOUNT_KINDS, DD_TYPES: DD_TYPES, normalizeAccount: normalizeAccount, normalizeAccounts: normalizeAccounts, accountStatus: accountStatus, accountPhaseLabel: accountPhaseLabel, resolvePeriod: resolvePeriod, hashtags: hashtags, periodRange: periodRange,
     normalizeTrade: normalizeTrade, normalizeLegs: normalizeLegs, legsToText: legsToText, LEG_REASONS: LEG_REASONS, MAX_LEGS: MAX_LEGS, derive: derive, deriveAll: deriveAll, chronoCmp: chronoCmp, validateTrade: validateTrade, computeMetrics: computeMetrics, equitySeries: equitySeries, groupMetrics: groupMetrics, costBreakdown: costBreakdown, weeklyReview: weeklyReview, integrityReport: integrityReport, syncCollect: syncCollect, syncApply: syncApply, positionSize: positionSize, forexSize: forexSize, parsePair: parsePair, pipSizeFor: pipSizeFor, quoteToAccountRate: quoteToAccountRate, tagPairs: tagPairs, tagsOf: tagsOf, aggregateBy: aggregateBy,
     applyFilters: applyFilters, startEquityBefore: startEquityBefore, sampleLevel: sampleLevel, toCSV: toCSV, parseCSV: parseCSV, csvToTrades: csvToTrades, detectDelimiter: detectDelimiter, fingerprint: fingerprint,
     migrateLegacyTrade: migrateLegacyTrade, buildBackup: buildBackup, validateBackup: validateBackup, normalizeSettings: normalizeSettings, DEFAULT_SETTINGS: DEFAULT_SETTINGS };
@@ -1021,7 +1139,7 @@ if (typeof module !== 'undefined') module.exports = TJDB;
 var S = {
   trades: [], reviews: {}, settings: TJ.normalizeSettings(), att: {}, D: { items: [], equityNow: null, initialCapital: null, closedWithoutNet: 0 }, byId: {},
   view: 'dashboard', saveState: 'idle', saveMsg: '', dbMode: 'none', dbError: null, legacy: null,
-  filters: { period: 'month', from: '', to: '', asset: '', strategy: '', session: '', direction: '', tf: '', tags: [] },
+  filters: { period: 'month', from: '', to: '', account: '', asset: '', strategy: '', session: '', direction: '', tf: '', tags: [] },
   journal: { search: '', from: '', to: '', asset: '', outcome: '', strategy: '', session: '', direction: '', tagq: '', issuesOnly: false, sort: { k: 'date', dir: -1 }, page: 1, size: 25 },
   cal: { y: 0, m: 0, sel: null }, rev: { kind: 'day', date: '', off: 0 }, ana: { bucket: 'day', cmp: '' }, dash: { prev: '', cmp: false }, drafts: {}
 };
@@ -1257,6 +1375,9 @@ function saveSettings(patch) { S.settings = TJ.normalizeSettings(Object.assign({
 
 function uniq(arr) { return arr.filter(function (x, i) { return x && arr.indexOf(x) === i; }).sort(function (a, b) { return a.localeCompare(b, 'it'); }); }
 function allAssets() { return uniq(S.trades.map(function (t) { return t.asset; })); }
+function allAccounts() { return uniq(S.trades.map(function (t) { return t.account; }).concat((S.settings.accounts || []).map(function (a) { return a.name; }))); }
+function accountByName(n) { var L = S.settings.accounts || []; for (var i = 0; i < L.length; i++) if (L[i].name === n) return L[i]; return null; }
+function itemsOfAccount(n) { return S.D.items.filter(function (x) { return x.t.account === n; }); }
 function allStrategies() { return uniq(S.trades.map(function (t) { return t.strategy; }).concat(S.settings.strategies)); }
 function allSessions() { return uniq(S.trades.map(function (t) { return t.session; }).concat(S.settings.sessions)); }
 function allTimeframes() { return uniq(S.trades.map(function (t) { return t.tfEntry; }).concat(S.settings.timeframes)); }
@@ -1274,9 +1395,9 @@ var PNAMES = { today: 'Oggi', week: 'Questa settimana', month: 'Questo mese', ye
 
 function scope() {
   var f = S.filters, p = TJ.resolvePeriod(f.period, TJ.todayStr(), { from: f.from || null, to: f.to || null });
-  var base = TJ.applyFilters(S.D.items, { asset: f.asset, strategy: f.strategy, session: f.session, direction: f.direction, tf: f.tf, tags: f.tags });
+  var base = TJ.applyFilters(S.D.items, { account: f.account, asset: f.asset, strategy: f.strategy, session: f.session, direction: f.direction, tf: f.tf, tags: f.tags });
   var items = TJ.applyFilters(base, { from: p.from, to: p.to }), startEquity = TJ.startEquityBefore(base, p.from, S.D.initialCapital);
-  return { items: items, base: base, period: p, startEquity: startEquity, m: TJ.computeMetrics(items, { startEquity: startEquity }), filtered: !!(f.asset || f.strategy || f.session || f.direction || f.tf || f.tags.length) };
+  return { items: items, base: base, period: p, startEquity: startEquity, m: TJ.computeMetrics(items, { startEquity: startEquity }), filtered: !!(f.account || f.asset || f.strategy || f.session || f.direction || f.tf || f.tags.length) };
 }
 function filterBar(opt, onChange) {
   opt = opt || {}; var f = S.filters, wrap = h('div', { class: 'fbar noprint', role: 'group', 'aria-label': 'Periodo e filtri' });
@@ -1296,9 +1417,11 @@ function filterBar(opt, onChange) {
     lastSel = selectEl(PLAST, '', function (v) { if (v) { f.period = v; paintPeriod(); onChange(); } }, 'Ultimi giorni');
     wrap.appendChild(h('div', { class: 'row' }, chipRow, lastSel)); wrap.appendChild(custom); paintPeriod();
   }
-  var active = [f.asset, f.strategy, f.session, f.direction, f.tf].filter(Boolean).length + f.tags.length;
+  var active = [f.account, f.asset, f.strategy, f.session, f.direction, f.tf].filter(Boolean).length + f.tags.length;
   var more = h('details', { class: 'filters', open: active ? 'open' : null }, h('summary', { text: 'Filtri' + (active ? ' (' + active + ' attivi)' : '') }));
   var bar = h('div', { class: 'bar' }); more.appendChild(bar);
+  var accOpts = allAccounts();
+  if (accOpts.length) bar.appendChild(lab('Conto', selectEl([['', 'Tutti']].concat(accOpts.map(function (a) { return [a, a]; })), f.account, ch('account'), 'Conto')));
   bar.appendChild(lab('Strumento', selectEl([['', 'Tutti']].concat(allAssets().map(function (a) { return [a, a]; })), f.asset, ch('asset'), 'Asset')));
   bar.appendChild(lab('Strategia', selectEl([['', 'Tutte']].concat(allStrategies().map(function (a) { return [a, a]; })), f.strategy, ch('strategy'), 'Strategia')));
   bar.appendChild(lab('Sessione', selectEl([['', 'Tutte']].concat(allSessions().map(function (a) { return [a, a]; })), f.session, ch('session'), 'Sessione')));
@@ -1665,10 +1788,14 @@ function openTradeForm(id, template) {
   function paintTagHint() { var hs = TJ.hashtags(notesEl.value); tagHint.textContent = hs.length ? 'Hashtag trovati nelle note: ' + hs.map(function (x) { return '#' + x; }).join(' ') + ' (si cercano nel Journal; il testo resta com\'è).' : 'Puoi scrivere #hashtag ovunque: sono solo parole del testo, non bloccano nulla.'; }
   notesEl.addEventListener('input', paintTagHint); paintTagHint();
   var tagSug = uniq(allTags().concat(base.tags));
+  var accNames = allAccounts();
+  var dlAcc = h('datalist', { id: 'dl-acc' }); accNames.forEach(function (a) { dlAcc.appendChild(h('option', { value: a })); });
+  var accField = txt('account', 'Conto', { list: 'dl-acc', hint: accNames.length ? 'Scegli il conto su cui hai fatto questo trade.' : null });
   var pvField = txt('pointValue', 'Valore per punto', { num: true, hint: 'Serve per calcolare il risultato dai prezzi (valuta del conto per 1,00 di movimento e 1 lotto/unità). Non uso valori predefiniti.' });
   var sQuick = h('div', { class: 'quick' }, h('div', { class: 'fgrid' },
     wrap('Data *', dateEl), txt('entryTime', 'Ora', { type: 'time' }), h('div', { class: 's2' }, wrap('Strumento *', assetEl), assetChips),
-    h('div', { class: 's2' }, wrap('Direzione *', dirBtns)), txt('size', 'Quantità / size', { num: true }),
+    h('div', { class: 's2' }, wrap('Direzione *', dirBtns)),
+    accNames.length ? h('div', { class: 's2' }, accField) : null, txt('size', 'Quantità / size', { num: true }),
     txt('entry', 'Prezzo di entrata', { num: true }), txt('exit', 'Prezzo di uscita', { num: true }),
     txt('pnlGross', 'Profitto lordo (prima dei costi)', { num: true, hint: 'Il "Profitto" che vedi sul broker, prima di commissioni e swap. Quei costi vengono tolti da soli.' }),
     txt('commissions', 'Commissioni', { num: true, hint: 'Scrivila come numero positivo: viene sottratta dal profitto lordo.' }),
@@ -1681,7 +1808,7 @@ function openTradeForm(id, template) {
     txt('exitDate', 'Data di uscita', { type: 'date', hint: 'Vuota = stesso giorno' }), txt('exitTime', 'Ora di uscita', { type: 'time' }),
     sel('market', 'Mercato', [['', '—']].concat(S.settings.markets.map(function (x) { return [x, x]; }))),
     sel('status', 'Stato', [['closed', 'Chiuso'], ['open', 'Aperto']], { hint: 'I trade aperti non entrano nelle statistiche' }),
-    txt('session', 'Sessione', { list: 'dl-sess', ph: 'London, New York AM…', hint: 'Campo libero: puoi usare una sessione personalizzata' }), txt('tfEntry', 'Timeframe di ingresso', { list: 'dl-tf' }), txt('tfHtf', 'Timeframe di analisi superiore', { list: 'dl-tf' }), txt('account', 'Broker / conto', {})), dlAssets, dlSess, dlTf);
+    txt('session', 'Sessione', { list: 'dl-sess', ph: 'London, New York AM…', hint: 'Campo libero: puoi usare una sessione personalizzata' }), txt('tfEntry', 'Timeframe di ingresso', { list: 'dl-tf' }), txt('tfHtf', 'Timeframe di analisi superiore', { list: 'dl-tf' }), accNames.length ? null : accField), dlAssets, dlSess, dlTf, dlAcc);
   var live = h('div', { class: 'live', 'aria-live': 'polite' });
   var sExe = h('fieldset', {}, h('legend', { text: 'Rischio ed esecuzione' }), h('div', { class: 'fgrid' },
     txt('sl', 'Stop loss iniziale', { num: true }), txt('tp', 'Take profit pianificato', { num: true }), txt('otherCosts', 'Altri costi', { num: true }), txt('slippage', 'Slippage', { num: true, hint: 'Solo informativo: è già incluso nei prezzi' }),
@@ -2528,6 +2655,194 @@ function viewSettings() {
   return root;
 }
 
+
+/* Conti: reale, demo o prop firm. Per le prop mostra la fase, l'obiettivo e i limiti di perdita. */
+var PHASE_FUNDED = 99;
+function blankAccount(kind) {
+  return { id: '', name: '', kind: kind || 'real', capital: null, startDate: '', steps: kind === 'prop' ? 2 : 0,
+    phase: 1, targets: kind === 'prop' ? [8, 5] : [], dailyLossPct: kind === 'prop' ? 5 : null,
+    maxLossPct: kind === 'prop' ? 10 : null, ddType: 'static', minDays: null, profitSplit: null, note: '', archived: false };
+}
+function viewAccounts() {
+  var A = S.acc = S.acc || { editing: null };
+  var root = h('div'), listBox = h('div');
+
+  function accounts() { return (S.settings.accounts || []).slice(); }
+
+  function startNew() { A.editing = blankAccount('prop'); paint(); }
+  function editAcc(a) { A.editing = JSON.parse(JSON.stringify(a)); paint(); }
+  function closeEditor() { A.editing = null; paint(); }
+
+  function persist(list, msg) {
+    saveSettings({ accounts: list }).then(function (okSave) {
+      toast(okSave === false ? 'Salvataggio non riuscito.' : msg, okSave === false);
+      render();
+    });
+  }
+  function removeAcc(a) {
+    askConfirm({ title: 'Eliminare il conto?', message: 'Il conto "' + a.name + '" viene tolto dall\'elenco. I trade non si cancellano: restano con il nome del conto scritto dentro.', confirmLabel: 'Elimina', danger: true })
+      .then(function (yes) {
+        if (!yes) return;
+        A.editing = null;
+        persist(accounts().filter(function (x) { return x.id !== a.id; }), 'Conto eliminato.');
+      });
+  }
+
+  // ------------------------------------------------ editor
+  function editorCard(draft) {
+    var err = h('div', { class: 'err', role: 'alert' });
+    function numField(key, label, hint, suffix) {
+      var el = h('input', { class: 'f', type: 'text', inputmode: 'decimal', autocomplete: 'off',
+        value: draft[key] == null ? '' : String(draft[key]).replace('.', ','), 'aria-label': label });
+      el.addEventListener('input', function () { var p = TJ.parseField(el.value); draft[key] = p.invalid ? null : p.value; });
+      return h('label', {}, label + (suffix ? ' (' + suffix + ')' : ''), el, hint ? h('span', { class: 'hint', text: hint }) : null);
+    }
+    function targetField(i) {
+      var el = h('input', { class: 'f', type: 'text', inputmode: 'decimal', autocomplete: 'off',
+        value: draft.targets[i] == null ? '' : String(draft.targets[i]).replace('.', ','), 'aria-label': 'Obiettivo fase ' + (i + 1) });
+      el.addEventListener('input', function () { var p = TJ.parseField(el.value); draft.targets[i] = p.invalid ? null : p.value; });
+      return h('label', {}, 'Obiettivo fase ' + (i + 1) + ' (%)', el);
+    }
+    var nameEl = h('input', { class: 'f', type: 'text', maxlength: '40', autocomplete: 'off', value: draft.name || '', placeholder: 'es. FTMO 100k', 'aria-label': 'Nome del conto' });
+    nameEl.addEventListener('input', function () { draft.name = nameEl.value; });
+    var dateEl = h('input', { class: 'f', type: 'date', value: draft.startDate || '', 'aria-label': 'Data di inizio' });
+    dateEl.addEventListener('change', function () { draft.startDate = dateEl.value; });
+    var noteEl = h('textarea', { class: 'f', rows: '2', maxlength: '300', 'aria-label': 'Note sul conto' });
+    noteEl.value = draft.note || '';
+    noteEl.addEventListener('input', function () { draft.note = noteEl.value; });
+
+    var kindEl = selectEl(TJ.ACCOUNT_KINDS, draft.kind, function (v) {
+      draft.kind = v;
+      if (v === 'prop' && !draft.steps) { draft.steps = 2; draft.targets = [8, 5]; if (draft.dailyLossPct == null) draft.dailyLossPct = 5; if (draft.maxLossPct == null) draft.maxLossPct = 10; }
+      if (v !== 'prop') draft.steps = 0;
+      paint();
+    }, 'Tipo di conto');
+    var stepsEl = selectEl([['0', 'Diretta: nessuna valutazione'], ['1', '1 fase'], ['2', '2 fasi'], ['3', '3 fasi']], String(draft.steps || 0), function (v) {
+      draft.steps = parseInt(v, 10) || 0;
+      while (draft.targets.length < draft.steps) draft.targets.push(null);
+      draft.targets = draft.targets.slice(0, draft.steps);
+      if (draft.phase > draft.steps + 1) draft.phase = draft.steps + 1;
+      paint();
+    }, 'Struttura della challenge');
+    var phaseOpts = [];
+    for (var i = 1; i <= (draft.steps || 0); i++) phaseOpts.push([String(i), 'Fase ' + i]);
+    phaseOpts.push([String((draft.steps || 0) + 1), 'Finanziato (challenge superata)']);
+    var phaseEl = selectEl(phaseOpts, String(draft.phase || 1), function (v) { draft.phase = parseInt(v, 10) || 1; paint(); }, 'Fase attuale');
+    var ddEl = selectEl(TJ.DD_TYPES, draft.ddType, function (v) { draft.ddType = v; }, 'Tipo di perdita massima');
+
+    var grid = h('div', { class: 'fgrid' },
+      h('div', { class: 's2' }, h('label', {}, 'Nome del conto *', nameEl, h('span', { class: 'hint', text: 'Scrivi lo stesso nome nel campo "Conto" dei trade: è così che il journal li collega.' }))),
+      h('label', {}, 'Tipo di conto', kindEl),
+      numField('capital', 'Dimensione del conto', 'Il saldo di partenza: per una prop da 100k, 100000.'),
+      h('label', {}, 'Data di inizio', dateEl, h('span', { class: 'hint', text: 'Vuota = contano tutti i trade con questo nome.' })));
+
+    if (draft.kind === 'prop') {
+      grid.appendChild(h('label', {}, 'Struttura', stepsEl));
+      grid.appendChild(h('label', {}, 'Fase attuale', phaseEl));
+      for (var j = 0; j < (draft.steps || 0); j++) grid.appendChild(targetField(j));
+      grid.appendChild(numField('profitSplit', 'La tua quota sugli utili', 'Solo informativo.', '%'));
+    }
+    grid.appendChild(numField('dailyLossPct', 'Perdita massima giornaliera', 'In percentuale sulla dimensione del conto. Vuoto = nessun limite.', '%'));
+    grid.appendChild(numField('maxLossPct', 'Perdita massima totale', 'In percentuale sulla dimensione del conto. Vuoto = nessun limite.', '%'));
+    grid.appendChild(h('label', {}, 'Come si calcola la perdita massima', ddEl, h('span', { class: 'hint', text: 'Trailing: la soglia sale insieme al massimo raggiunto dal conto.' })));
+    grid.appendChild(numField('minDays', 'Giorni minimi di operatività', 'Quanti giorni diversi devi aver operato. Vuoto = nessun minimo.'));
+    grid.appendChild(h('div', { class: 's4' }, h('label', {}, 'Note', noteEl)));
+
+    function save() {
+      err.textContent = '';
+      if (!(draft.name || '').trim()) { err.textContent = 'Scrivi il nome del conto.'; return; }
+      var list = accounts(), clash = list.filter(function (x) { return x.id !== draft.id && x.name.trim().toLowerCase() === draft.name.trim().toLowerCase(); });
+      if (clash.length) { err.textContent = 'Esiste già un conto con questo nome.'; return; }
+      draft.name = draft.name.trim();
+      draft.updatedAt = Date.now();
+      if (!draft.id) { draft.id = TJ.newId(); list.push(draft); }
+      else list = list.map(function (x) { return x.id === draft.id ? draft : x; });
+      A.editing = null;
+      persist(list, 'Conto salvato.');
+    }
+
+    return h('div', { class: 'card' },
+      h('h2', { text: draft.id ? 'Modifica conto' : 'Nuovo conto' }), grid, err,
+      h('div', { class: 'row', style: 'margin-top:10px' },
+        h('button', { class: 'btn primary', type: 'button', text: 'Salva conto', onclick: save }),
+        h('button', { class: 'btn', type: 'button', text: 'Annulla', onclick: closeEditor }),
+        draft.id ? h('button', { class: 'btn danger', type: 'button', text: 'Elimina', onclick: function () { removeAcc(draft); } }) : null));
+  }
+
+  // ------------------------------------------------ scheda di un conto
+  function limRow(label, value, cls) {
+    return h('div', { class: 'lim' }, h('span', { class: 'ln', text: label }), h('span', { class: 'lv ' + (cls || ''), text: value }));
+  }
+  function accountCard(a) {
+    var st = TJ.accountStatus(a, itemsOfAccount(a.name), { today: TJ.todayStr() });
+    var box = h('div', { class: 'card' });
+    box.appendChild(h('div', { class: 'acchead' },
+      h('h2', { text: a.name, style: 'margin:0' }),
+      h('span', { class: 'pill' + (st.blown ? ' warn' : ''), text: st.phaseLabel })));
+
+    box.appendChild(h('div', { class: 'grid kpis', style: 'margin-top:10px' },
+      kpi('Saldo', st.equity == null ? ND : money(st.equity), { sub: a.capital != null ? 'partito da ' + money(a.capital) : 'dimensione del conto non indicata' }),
+      kpi('Risultato', money(st.net, true), { cls: tone(st.net), sub: st.netPct != null ? fnum(st.netPct, 2) + '% del conto' : null }),
+      kpi('Operazioni', String(st.n), { sub: st.daysTraded ? st.daysTraded + (st.daysTraded === 1 ? ' giorno' : ' giorni') + ' di operatività' : 'nessun trade collegato' })));
+
+    if (st.targetMoney != null) {
+      var p = Math.max(0, Math.min(100, st.progressPct || 0));
+      box.appendChild(h('p', { class: 'note', style: 'margin:10px 0 0', text: 'Obiettivo della fase: ' + money(st.targetMoney) + ' (' + pct(st.targetPct, 2) + ' del conto)' }));
+      box.appendChild(h('div', { class: 'pbar' }, h('i', { class: st.targetReached ? 'done' : '', style: 'width:' + p.toFixed(1) + '%' })));
+      box.appendChild(h('p', { class: 'hint', style: 'margin:0', text: st.targetReached
+        ? 'Obiettivo raggiunto' + (st.daysLeft ? ', ma ' + (st.daysLeft === 1 ? 'manca ancora 1 giorno' : 'mancano ancora ' + st.daysLeft + ' giorni') + ' di operatività.' : ': la fase è superata.')
+        : (st.net <= 0
+          ? 'Sei sotto di ' + money(-st.net) + ': per l\'obiettivo servono ' + money(st.remaining) + '.'
+          : 'Fatto ' + pct(st.progressPct, 0) + ' dell\'obiettivo · mancano ' + money(st.remaining) + '.') }));
+    } else if (a.kind === 'prop' && !st.funded) {
+      box.appendChild(h('p', { class: 'hint', style: 'margin:10px 0 0', text: 'Obiettivo della fase non impostato: aprilo in modifica e scrivi la percentuale da fare.' }));
+    }
+
+    var lims = h('div', { style: 'margin-top:10px' });
+    if (st.minDays != null) lims.appendChild(limRow('Giorni di operatività', st.daysTraded + ' su ' + st.minDays + (st.daysLeft ? (st.daysLeft === 1 ? ' · ne manca 1' : ' · ne mancano ' + st.daysLeft) : ' · fatti'), st.daysLeft ? '' : 'pos'));
+    if (st.dailyLimit != null) {
+      lims.appendChild(limRow('Perdita massima al giorno', money(st.dailyLimit), ''));
+      lims.appendChild(limRow('Oggi', (st.todayNet ? money(st.todayNet, true) : 'nessun trade') + ' · margine ' + money(st.dailyLeft), st.dailyLeft === 0 ? 'neg' : ''));
+      if (st.dailyBreached) lims.appendChild(limRow('Attenzione', 'Il ' + TJ.fmtDate(st.worstDayDate) + ' hai perso ' + money(-st.worstDay) + ': limite giornaliero superato.', 'neg'));
+    }
+    if (st.maxLoss != null) {
+      lims.appendChild(limRow(a.ddType === 'trailing' ? 'Non scendere sotto (trailing)' : 'Non scendere sotto', money(st.floor) + (a.ddType === 'trailing' ? ' · massimo toccato ' + money(st.peak) : ''), ''));
+      lims.appendChild(limRow('Margine residuo', st.maxLeft == null ? ND : money(st.maxLeft), st.maxLeft != null && st.maxLeft <= 0 ? 'neg' : ''));
+      if (st.maxBreached) lims.appendChild(limRow('Attenzione', 'Perdita massima superata: scostamento di ' + money(st.worstDd) + ' su un limite di ' + money(st.maxLoss) + '.', 'neg'));
+    }
+    if (lims.children.length) box.appendChild(lims);
+    if (a.profitSplit != null && st.funded && st.net > 0) box.appendChild(h('p', { class: 'hint', style: 'margin:8px 0 0', text: 'Con una quota del ' + pct(a.profitSplit, 0) + ' ti spetterebbero circa ' + money(st.net * a.profitSplit / 100) + '.' }));
+    if (a.note) box.appendChild(h('p', { class: 'note', style: 'white-space:pre-line', text: a.note }));
+    if (!st.n) box.appendChild(h('p', { class: 'hint', style: 'margin:8px 0 0', text: 'Nessun trade collegato a questo conto: nei trade scrivi "' + a.name + '" nel campo Conto.' }));
+
+    box.appendChild(h('div', { class: 'row', style: 'margin-top:10px' },
+      h('button', { class: 'btn sm', type: 'button', text: 'Modifica', onclick: function () { editAcc(a); } }),
+      h('button', { class: 'btn sm', type: 'button', text: 'Vedi le statistiche', onclick: function () { S.filters.account = a.name; navTo('dashboard'); } }),
+      h('button', { class: 'btn sm danger', type: 'button', text: 'Elimina', onclick: function () { removeAcc(a); } })));
+    return box;
+  }
+
+  function paint() {
+    clear(listBox);
+    if (A.editing) { listBox.appendChild(editorCard(A.editing)); return; }
+    var list = accounts();
+    if (!list.length) {
+      listBox.appendChild(emptyBox('Non hai ancora creato nessun conto. Creane uno per vedere a che punto sei con la challenge e quanto margine ti resta sui limiti di perdita.', 'Crea il primo conto', startNew));
+      return;
+    }
+    list.forEach(function (a) { listBox.appendChild(accountCard(a)); });
+  }
+
+  root.appendChild(h('div', { class: 'card' },
+    h('h2', { text: 'Conti' }),
+    h('p', { class: 'note', text: 'Un conto per ogni prop o conto reale che segui. Per le prop il journal calcola quanto manca all\'obiettivo della fase e quanto margine ti resta sulla perdita giornaliera e su quella massima, usando i trade in cui hai scritto il nome del conto.' }),
+    h('div', { class: 'row', style: 'margin-top:8px' },
+      h('button', { class: 'btn primary', type: 'button', text: '+ Nuovo conto', onclick: startNew }))));
+  root.appendChild(listBox);
+  paint();
+  return root;
+}
+
 /* Appunti: testo libero, non legato ai trade. Usa lo stesso archivio delle revisioni
    (store "reviews", chiave note:<id>), così entra da sola in backup e sincronizzazione. */
 function isNoteRec(r) { return !!r && r.kind === 'note'; }
@@ -2659,7 +2974,7 @@ function viewNotes() {
   paint();
   return root;
 }
-var NAV = [['dashboard', 'Dashboard', viewDashboard], ['journal', 'Trade Journal', viewJournal], ['analytics', 'Analytics', viewAnalytics], ['risk', 'Risk Management', viewRisk], ['strategies', 'Strategie e setup', viewStrategies], ['psychology', 'Diario psicologico', viewPsychology], ['notes', 'Appunti', viewNotes], ['calendar', 'Calendario', viewCalendar], ['backup', 'Report e backup', viewBackup], ['settings', 'Impostazioni', viewSettings]];
+var NAV = [['dashboard', 'Dashboard', viewDashboard], ['journal', 'Trade Journal', viewJournal], ['analytics', 'Analytics', viewAnalytics], ['risk', 'Risk Management', viewRisk], ['accounts', 'Conti', viewAccounts], ['strategies', 'Strategie e setup', viewStrategies], ['psychology', 'Diario psicologico', viewPsychology], ['notes', 'Appunti', viewNotes], ['calendar', 'Calendario', viewCalendar], ['backup', 'Report e backup', viewBackup], ['settings', 'Impostazioni', viewSettings]];
 function navTo(r) {
   if (!NAV.some(function (n) { return n[0] === r; })) r = 'dashboard';
   S.route = r; try { if (location.hash !== '#/' + r) history.replaceState(null, '', '#/' + r); } catch (e) { /* alcuni browser/app bloccano la cronologia: la navigazione funziona comunque */ }
