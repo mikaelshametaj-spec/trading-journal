@@ -217,6 +217,23 @@ ol.steps{padding-left:20px;margin:8px 0} ol.steps li{margin:4px 0}
 .limitbar{margin:12px 0} .limitbar .track{height:12px;border-radius:7px;background:var(--panel3,#2a2a2f);overflow:hidden;margin:6px 0 3px;border:1px solid var(--border)}
 .limitbar .fill{height:100%;border-radius:7px;background:var(--pos,#4caf7d);min-width:0} .limitbar .fill.warn{background:#d9a441} .limitbar .fill.bad{background:var(--neg,#e5645f);background-image:repeating-linear-gradient(45deg,rgba(0,0,0,.25) 0 6px,transparent 6px 12px)}
 
+.macro-hero{border-left:4px solid var(--border2)} .macro-hero.macro-up{border-left-color:var(--pos)} .macro-hero.macro-down{border-left-color:var(--neg)} .macro-hero.macro-flat{border-left-color:var(--gold)}
+.macro-bias{font-family:var(--mono);font-size:26px;font-weight:700;letter-spacing:.02em;margin-top:6px}
+.macro-up .macro-bias{color:var(--pos)} .macro-down .macro-bias{color:var(--neg)} .macro-flat .macro-bias{color:var(--gold)}
+.macro-str{display:inline-flex;gap:3px} .macro-str i{width:16px;height:6px;border-radius:3px;background:var(--panel3)} .macro-str i.on{background:var(--gold)}
+.macro-p{font-size:14px;line-height:1.55;color:var(--text);margin:4px 0 0}
+.macro-factors{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
+.macro-factor,.macro-ev{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;min-width:0}
+.macro-events{display:grid;gap:8px} .macro-ev.done{opacity:.75}
+.macro-nums{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:12.5px;color:var(--dim);margin-top:6px} .macro-nums b{color:var(--text);font-family:var(--mono)}
+.macro-risk{border-color:var(--warn)} .macro-risk ul{margin:0;padding-left:18px} .macro-risk li{margin:4px 0;font-size:14px}
+.macro-kpis{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}
+.macro-learn{border-left:4px solid var(--gold)}
+.macro-change{margin-top:10px;padding:8px 10px;border-radius:7px;background:var(--goldbg);font-size:13.5px;line-height:1.5}
+.macro-sessions{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+.macro-list{margin:6px 0 0;padding-left:18px} .macro-list li{margin:4px 0;font-size:14px;line-height:1.5}
+.macro-alist{display:grid;gap:8px;margin-top:10px} .macro-al{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:9px 12px} .macro-al.hi{border-color:var(--neg)}
+.macro-src{margin:8px 0 0;padding-left:18px;font-size:13px} .macro-src li{margin:3px 0;overflow-wrap:anywhere} .macro-src a{color:var(--gold)}
 </style></head><body>
 <a class="sr" href="#main">Vai al contenuto</a>
 <div class="app"><aside class="side" id="side" aria-label="Navigazione"><div class="brand"><b>TJ</b> Trading Journal Pro</div><nav class="nav" id="nav" aria-label="Sezioni"></nav><div style="flex:1"></div><div id="status" class="status"></div></aside>
@@ -2974,7 +2991,240 @@ function viewNotes() {
   paint();
   return root;
 }
-var NAV = [['dashboard', 'Dashboard', viewDashboard], ['journal', 'Trade Journal', viewJournal], ['analytics', 'Analytics', viewAnalytics], ['risk', 'Risk Management', viewRisk], ['accounts', 'Conti', viewAccounts], ['strategies', 'Strategie e setup', viewStrategies], ['psychology', 'Diario psicologico', viewPsychology], ['notes', 'Appunti', viewNotes], ['calendar', 'Calendario', viewCalendar], ['backup', 'Report e backup', viewBackup], ['settings', 'Impostazioni', viewSettings]];
+/* MACRO — analisi macroeconomica sull'oro e avvisi notizie, generati da AI tramite la funzione Supabase "macro-analisi".
+   Serve l'accesso con l'account del journal. L'ultima analisi ricevuta resta salvata sul dispositivo (si vede anche offline).
+   Le notifiche push arrivano dal service worker (sw.js) anche ad app chiusa. */
+function macroCall(body, timeout) {
+  var cfg = S.sync && S.sync.cfg;
+  if (!cfg || (!cfg.access && !cfg.refresh)) return Promise.reject(new Error('Per l\'analisi macro devi accedere con il tuo account (Impostazioni → Sincronizzazione).'));
+  return syncEnsureToken().then(function () {
+    var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null, tm = ctl ? setTimeout(function () { ctl.abort(); }, timeout || 30000) : null;
+    return fetch(cfg.url + '/functions/v1/macro-analisi', { method: 'POST', headers: { apikey: cfg.anon, Authorization: 'Bearer ' + cfg.access, 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}), signal: ctl ? ctl.signal : undefined, cache: 'no-store', credentials: 'omit' }).then(function (res) {
+      if (tm) clearTimeout(tm);
+      return res.text().then(function (txt) {
+        var j = null; try { j = txt ? JSON.parse(txt) : null; } catch (e) { j = null; }
+        if (!res.ok) throw new Error(res.status === 404 ? 'La funzione "macro-analisi" non è ancora installata su Supabase.' : (j && (j.error || j.message || j.msg)) || ('Errore HTTP ' + res.status));
+        if (!j) throw new Error('Risposta non valida dal server.');
+        return j;
+      });
+    }, function (e) { if (tm) clearTimeout(tm); throw new Error(e && e.name === 'AbortError' ? 'Il server sta impiegando troppo tempo: riprova tra un minuto.' : 'Rete non raggiungibile (sei offline?).'); });
+  });
+}
+function macroAgo(iso) {
+  var t = new Date(iso).getTime(); if (!isFinite(t)) return '';
+  var m = Math.max(0, Math.round((Date.now() - t) / 60000));
+  if (m < 1) return 'adesso'; if (m < 60) return m + ' min fa';
+  var hh = Math.floor(m / 60); if (hh < 24) return hh + (hh === 1 ? ' ora fa' : ' ore fa');
+  var d = Math.floor(hh / 24); return d + (d === 1 ? ' giorno fa' : ' giorni fa');
+}
+function macroDir(d) { d = String(d || '').toLowerCase(); return d.indexOf('rialz') === 0 ? 'up' : d.indexOf('ribass') === 0 ? 'down' : 'flat'; }
+function macroPill(d, txt) { var k = macroDir(d); return h('span', { class: 'pill ' + (k === 'up' ? 'win' : k === 'down' ? 'loss' : 'be'), text: (k === 'up' ? '▲ ' : k === 'down' ? '▼ ' : '● ') + (txt || d || 'neutrale') }); }
+function macroSafeUrl(u) { return typeof u === 'string' && /^https?:\/\//i.test(u) ? u : null; }
+function macroStr(v) { return v == null ? '' : String(v); }
+function macroArr(v) { return Array.isArray(v) ? v : []; }
+
+// ----- notifiche push -----
+function pushSupported() { return typeof navigator !== 'undefined' && 'serviceWorker' in navigator && typeof window.PushManager !== 'undefined' && typeof window.Notification !== 'undefined'; }
+function pushIsIOSBrowser() { var ua = navigator.userAgent || ''; var ios = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); var standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true; return ios && !standalone; }
+function b64uToBytes(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; var raw = atob(s), out = new Uint8Array(raw.length); for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i); return out; }
+function pushReg() {
+  return Promise.race([navigator.serviceWorker.ready, new Promise(function (_, rej) { setTimeout(function () { rej(new Error('Il servizio offline dell\'app non è attivo: apri il journal dal sito (non dal file) e ricarica la pagina.')); }, 8000); })]);
+}
+function pushState() {
+  if (!pushSupported()) return Promise.resolve('unsupported');
+  if (Notification.permission === 'denied') return Promise.resolve('denied');
+  return pushReg().then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (s) { return s ? 'on' : 'off'; }, function () { return 'off'; });
+}
+function pushEnable() {
+  if (!pushSupported()) return Promise.reject(new Error('Questo browser non supporta le notifiche.'));
+  return Notification.requestPermission().then(function (perm) {
+    if (perm !== 'granted') throw new Error('Permesso per le notifiche non concesso. Puoi attivarlo dalle impostazioni del browser per questo sito.');
+    return Promise.all([pushReg(), macroCall({ action: 'vapid' })]);
+  }).then(function (r) {
+    var reg = r[0], key = r[1].publicKey;
+    return reg.pushManager.getSubscription().then(function (old) { return old ? old.unsubscribe() : null; }).then(function () {
+      return Promise.race([reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(key) }),
+        new Promise(function (_, rej) { setTimeout(function () { rej(new Error('Il servizio di notifiche del browser non risponde: controlla la connessione e riprova.')); }, 20000); })]);
+    });
+  }).then(function (sub) { return macroCall({ action: 'iscrivi', sub: sub.toJSON(), test: true }); });
+}
+function pushDisable() {
+  return pushReg().then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (sub) {
+    if (!sub) return null; var ep = sub.endpoint;
+    return sub.unsubscribe().then(function () { return macroCall({ action: 'disiscrivi', endpoint: ep }).catch(function () {}); });
+  });
+}
+
+function viewMacro() {
+  var M = S.macro = S.macro || { data: null, loading: false, err: '', loadedLocal: false, note: '', push: null, pushBusy: false, pushErr: '' };
+  var root = h('div', { class: 'macro' });
+
+  function load(force) {
+    if (M.loading) return; M.loading = true; M.err = ''; M.note = ''; paint();
+    macroCall({ action: 'analisi', force: !!force }, 150000).then(function (j) {
+      M.data = j; M.loading = false; M.fetchedAt = Date.now();
+      if (j.limited) M.note = 'L\'analisi è stata aggiornata meno di 30 minuti fa: per contenere l\'uso ti mostro quella.';
+      TJDB.put('meta', { key: 'macro:last', report: j }).catch(function () {});
+      if (S.view === 'macro' && M.paint) M.paint();
+    }, function (e) { M.loading = false; M.err = e.message; if (S.view === 'macro' && M.paint) M.paint(); });
+  }
+  function refreshPush() { pushState().then(function (st) { M.push = st; if (S.view === 'macro' && M.paint) M.paint(); }); }
+  function togglePush(on) {
+    M.pushBusy = true; M.pushErr = ''; paint();
+    (on ? pushEnable() : pushDisable()).then(function () { M.pushBusy = false; toast(on ? 'Avvisi attivati: dovresti ricevere subito una notifica di prova.' : 'Avvisi disattivati su questo dispositivo.'); refreshPush(); },
+      function (e) { M.pushBusy = false; M.pushErr = e.message; refreshPush(); });
+  }
+
+  function alertsCard(list, logged) {
+    var st = M.push, box = h('div', { class: 'card macro-alerts', style: 'margin-bottom:12px' });
+    var right;
+    if (st === 'on') right = h('div', { class: 'row' }, h('span', { class: 'pill win', text: '● Attivi su questo dispositivo' }), h('button', { class: 'btn sm', type: 'button', disabled: M.pushBusy, text: 'Disattiva', onclick: function () { togglePush(false); } }));
+    else if (st === 'unsupported') right = h('span', { class: 'pill be', text: 'Notifiche non supportate qui' });
+    else if (st === 'denied') right = h('span', { class: 'pill loss', text: 'Notifiche bloccate nel browser' });
+    else right = h('button', { class: 'btn primary', type: 'button', disabled: M.pushBusy || !logged || st == null, text: M.pushBusy ? 'Attivazione…' : '🔔 Attiva avvisi', onclick: function () { togglePush(true); } });
+    box.appendChild(h('div', { class: 'row' }, h('h2', { style: 'margin:0', text: 'Avvisi notizie' }), h('span', { class: 'sp' }), right));
+    box.appendChild(h('p', { class: 'hint', text: 'Controllo automatico ogni 15 minuti, 24 ore su 5: promemoria 20 minuti prima delle news USA ad alto impatto, dato effettivo appena esce e notizie dell\'ultimo momento che possono muovere l\'oro.' }));
+    if (st === 'unsupported' && pushIsIOSBrowser()) box.appendChild(h('p', { class: 'hint', text: 'Su iPhone le notifiche funzionano solo dall\'app aggiunta alla schermata Home (Condividi → Aggiungi alla schermata Home), con iOS 16.4 o successivo.' }));
+    if (st === 'denied') box.appendChild(h('p', { class: 'hint', text: 'Hai bloccato le notifiche per questo sito: riattivale dalle impostazioni del browser (icona del lucchetto → Notifiche) e ricarica.' }));
+    if (M.pushErr) box.appendChild(h('div', { class: 'banner err', role: 'alert', style: 'margin:8px 0 0', text: M.pushErr }));
+    if (list.length) box.appendChild(h('div', { class: 'macro-alist' }, list.map(function (a) {
+      var icon = a.kind === 'promemoria' ? '⏰' : a.impatto === 'alto' ? '🔴' : '🟠', u = macroSafeUrl(a.url);
+      return h('div', { class: 'macro-al' + (a.impatto === 'alto' ? ' hi' : '') },
+        h('div', { class: 'row' }, h('span', { 'aria-hidden': 'true', text: icon }), h('b', { text: macroStr(a.titolo) }), h('span', { class: 'sp' }), a.direzione && a.direzione !== 'incerta' ? macroPill(a.direzione, 'oro ' + a.direzione) : null, h('span', { class: 'hint', style: 'margin:0', text: macroAgo(a.created_at) })),
+        a.testo ? h('p', { class: 'macro-p', style: 'font-size:13.5px', text: macroStr(a.testo) }) : null,
+        u ? h('a', { href: u, target: '_blank', rel: 'noopener noreferrer', class: 'hint', style: 'color:var(--gold)', text: 'Fonte ↗' }) : null);
+    })));
+    else if (logged) box.appendChild(h('p', { class: 'hint', style: 'margin-top:8px', text: 'Nessun avviso nelle ultime 24 ore.' }));
+    return box;
+  }
+
+  function paint() {
+    clear(root);
+    var cfg = S.sync && S.sync.cfg, logged = !!(cfg && (cfg.access || cfg.refresh)), d = M.data, a = d && d.analysis;
+
+    root.appendChild(h('div', { class: 'row', style: 'margin-bottom:12px' },
+      h('div', { class: 'hint', style: 'margin:0', text: d ? 'Analisi delle ' + new Date(d.created_at || d.generated_at).toLocaleString('it-IT', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + ' · ' + macroAgo(d.created_at || d.generated_at) : 'Nessuna analisi ancora caricata.' }),
+      h('span', { class: 'sp' }),
+      h('button', { class: 'btn primary', type: 'button', disabled: M.loading || !logged, text: M.loading ? 'Analisi in corso…' : (d ? '↻ Aggiorna analisi' : 'Genera analisi'), onclick: function () { load(true); } })));
+
+    if (!logged) root.appendChild(h('div', { class: 'banner warn' }, h('b', { text: 'Accesso richiesto. ' }), 'L\'analisi macro e gli avvisi usano il tuo account del journal. Accedi in ', h('a', { href: '#/settings', text: 'Impostazioni' }), ' (sezione sincronizzazione) e torna qui.'));
+    if (M.loading) root.appendChild(h('div', { class: 'banner', role: 'status' }, h('b', { text: 'Sto leggendo calendario, rendimenti e notizie… ' }), 'Se serve una nuova analisi ci vogliono 30-90 secondi.'));
+    if (M.err) root.appendChild(h('div', { class: 'banner err', role: 'alert' }, h('b', { text: 'Analisi non disponibile. ' }), M.err));
+    if (M.note) root.appendChild(h('div', { class: 'banner', role: 'status', text: M.note }));
+
+    root.appendChild(alertsCard(macroArr(d && d.avvisi), logged));
+
+    if (!d) { root.appendChild(disclaimer()); return; }
+    if (!a) {
+      root.appendChild(h('div', { class: 'card' }, h('h2', { text: 'Risposta non strutturata' }), h('p', { class: 'hint', text: 'L\'AI non ha restituito il formato previsto. Ecco il testo ricevuto:' }), h('pre', { style: 'white-space:pre-wrap;font-family:var(--sans);font-size:13px', text: macroStr(d.raw_text) })));
+      root.appendChild(disclaimer()); return;
+    }
+
+    // quadro generale
+    var forza = Math.max(1, Math.min(3, Number(a.forza) || 1)), dir = macroDir(a.bias);
+    root.appendChild(h('div', { class: 'card macro-hero macro-' + dir },
+      h('div', { class: 'row' }, h('span', { class: 'hint', style: 'margin:0;text-transform:uppercase;letter-spacing:.06em', text: 'Bias macro XAUUSD' }), h('span', { class: 'sp' }),
+        h('span', { class: 'macro-str', title: 'Forza del bias ' + forza + ' su 3', 'aria-label': 'Forza del bias ' + forza + ' su 3' }, [1, 2, 3].map(function (i) { return h('i', { class: i <= forza ? 'on' : '' }); }))),
+      h('div', { class: 'macro-bias', text: (dir === 'up' ? '▲ ' : dir === 'down' ? '▼ ' : '● ') + (macroStr(a.bias) || 'neutrale').toUpperCase() }),
+      a.titolo ? h('h2', { style: 'margin:6px 0 8px', text: macroStr(a.titolo) }) : null,
+      h('p', { class: 'macro-p', text: macroStr(a.sintesi) }),
+      macroStr(a.cambiamenti).trim() ? h('div', { class: 'macro-change' }, h('b', { text: 'Cosa è cambiato: ' }), macroStr(a.cambiamenti)) : null));
+
+    // il concetto macro da capire oggi
+    if (macroStr(a.da_capire).trim()) root.appendChild(h('div', { class: 'card macro-learn', style: 'margin-top:12px' }, h('h2', { text: '📘 Da capire oggi' }), h('p', { class: 'macro-p', text: macroStr(a.da_capire) })));
+
+    // oggi
+    var oggi = a.oggi || {}, ses = macroArr(oggi.sessioni), dg = macroArr(oggi.da_guardare);
+    if (ses.length || dg.length) root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Piano della giornata' }),
+      ses.length ? h('div', { class: 'macro-sessions' }, ses.map(function (s) {
+        return h('div', { class: 'macro-factor' }, h('div', { class: 'row' }, h('b', { text: macroStr(s.sessione) }), h('span', { class: 'sp' }), h('span', { class: 'hint', style: 'margin:0;font-family:var(--mono)', text: macroStr(s.orario) })), h('p', { class: 'macro-p', style: 'font-size:13.5px', text: macroStr(s.cosa_aspettarsi) }));
+      })) : null,
+      dg.length ? h('div', { style: 'margin-top:10px' }, h('b', { text: 'Da guardare oggi' }), h('ul', { class: 'macro-list' }, dg.map(function (x) { return h('li', { text: macroStr(x) }); }))) : null));
+
+    // lettura CRT
+    var crt = a.crt && typeof a.crt === 'object' ? a.crt : null, cwn = crt ? macroArr(crt.candele_con_news) : [];
+    if (crt && (crt.range_chiave || crt.lettura || cwn.length)) root.appendChild(h('div', { class: 'card macro-crt', style: 'margin-top:12px' }, h('h2', { text: 'Lettura CRT' }),
+      crt.range_chiave ? h('div', { class: 'macro-change', style: 'margin-top:0' }, h('b', { text: 'Range chiave di oggi: ' }), macroStr(crt.range_chiave)) : null,
+      cwn.length ? h('div', { class: 'macro-events', style: 'margin-top:10px' }, cwn.map(function (c) {
+        return h('div', { class: 'macro-ev' }, h('div', { class: 'row' }, h('span', { class: 'pill loss', text: 'News' }), h('b', { text: macroStr(c.candela) })),
+          c.news ? h('div', { class: 'macro-nums', text: macroStr(c.news) }) : null,
+          c.rischio ? h('p', { class: 'macro-p', style: 'margin-top:6px;font-size:13.5px', text: macroStr(c.rischio) }) : null);
+      })) : null,
+      crt.lettura ? h('p', { class: 'macro-p', style: 'margin-top:10px', text: macroStr(crt.lettura) }) : null,
+      h('p', { class: 'hint', text: 'Griglia H4 CRT: candele alle 17, 21, 01, 05, 09, 13 di New York.' })));
+
+    // finestre di rischio
+    var fr = macroArr(a.finestre_rischio);
+    if (fr.length) root.appendChild(h('div', { class: 'card macro-risk', style: 'margin-top:12px' }, h('h2', { text: '⚠ Finestre di rischio' }), h('ul', { class: 'macro-list' }, fr.map(function (x) { return h('li', { text: macroStr(x) }); }))));
+
+    // Fed
+    var fed = a.fed;
+    if (fed && typeof fed === 'object') root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Fed e tassi' }),
+      h('div', { class: 'grid macro-kpis' },
+        h('div', { class: 'kpi' }, h('div', { class: 'l', text: 'Tasso attuale' }), h('div', { class: 'v', style: 'font-size:17px', text: macroStr(fed.tasso_attuale) || 'N/D' })),
+        h('div', { class: 'kpi' }, h('div', { class: 'l', text: 'Prossimo FOMC' }), h('div', { class: 'v', style: 'font-size:17px', text: macroStr(fed.prossimo_fomc) || 'N/D' })),
+        h('div', { class: 'kpi' }, h('div', { class: 'l', text: 'Probabilità' }), h('div', { class: 'v', style: 'font-size:14px;font-family:var(--sans)', text: macroStr(fed.probabilita) || 'N/D' }))),
+      fed.tono ? h('p', { class: 'macro-p', style: 'margin-top:8px', text: macroStr(fed.tono) }) : null));
+
+    // fattori
+    var fatt = macroArr(a.fattori);
+    if (fatt.length) root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Perché: i fattori che muovono l\'oro' }),
+      h('div', { class: 'macro-factors' }, fatt.map(function (f) {
+        return h('div', { class: 'macro-factor' }, h('div', { class: 'row' }, h('b', { text: macroStr(f.nome) }), h('span', { class: 'sp' }), macroPill(f.direzione)), h('p', { class: 'macro-p', text: macroStr(f.spiegazione) }));
+      }))));
+
+    // eventi
+    var ev = macroArr(a.eventi);
+    if (ev.length) root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Eventi della settimana' }),
+      h('div', { class: 'macro-events' }, ev.map(function (e) {
+        var hi = /alto|high/i.test(macroStr(e.impatto)), done = !!macroStr(e.effettivo).trim();
+        return h('div', { class: 'macro-ev' + (done ? ' done' : '') },
+          h('div', { class: 'row' }, h('span', { class: 'pill ' + (hi ? 'loss' : 'warn'), text: hi ? 'Alto' : 'Medio' }), h('b', { text: macroStr(e.evento) }), h('span', { class: 'sp' }), h('span', { class: 'hint', style: 'margin:0;font-family:var(--mono)', text: macroStr(e.quando) })),
+          h('div', { class: 'macro-nums' },
+            h('span', {}, 'Previsione ', h('b', { text: macroStr(e.previsione) || '—' })),
+            h('span', {}, 'Precedente ', h('b', { text: macroStr(e.precedente) || '—' })),
+            h('span', {}, 'Effettivo ', h('b', { text: done ? macroStr(e.effettivo) : 'non ancora uscito' }))),
+          e.scenari ? h('p', { class: 'macro-p', style: 'margin-top:6px', text: macroStr(e.scenari) }) : null);
+      }))));
+
+    if (a.cosa_cambierebbe) root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Cosa ribalterebbe lo scenario' }), h('p', { class: 'macro-p', text: macroStr(a.cosa_cambierebbe) })));
+
+    // dati FRED
+    var fred = d.inputs && Array.isArray(d.inputs.dati_fred) ? d.inputs.dati_fred.filter(function (x) { return x && x.valore != null; }) : [];
+    if (fred.length) root.appendChild(h('div', { class: 'card', style: 'margin-top:12px' }, h('h2', { text: 'Dati di mercato (FRED)' }),
+      h('div', { class: 'grid macro-kpis' }, fred.map(function (x) {
+        var ch = x.variazione_5_giorni;
+        return h('div', { class: 'kpi' }, h('div', { class: 'l', text: x.nome }), h('div', { class: 'v', text: fnum(x.valore, 2) }),
+          h('span', { class: 'delta' + (ch > 0 ? ' pos' : ch < 0 ? ' neg' : ''), text: ch == null ? 'al ' + x.data : (ch > 0 ? '+' : '') + fnum(ch, 2) + ' in 5 giorni · al ' + x.data }));
+      })), h('p', { class: 'hint', text: 'Dati ufficiali Federal Reserve di St. Louis, aggiornati con un giorno lavorativo di ritardo.' })));
+
+    // fonti
+    var seen = {}, src = macroArr(a.fonti_chiave).concat(macroArr(d.sources)).filter(function (s) { var u = s && macroSafeUrl(s.url); if (!u || seen[u]) return false; seen[u] = 1; return true; }).slice(0, 12);
+    if (src.length) root.appendChild(h('details', { class: 'card', style: 'margin-top:12px' }, h('summary', { text: 'Fonti consultate (' + src.length + ')' }),
+      h('ul', { class: 'macro-src' }, src.map(function (s) { return h('li', {}, h('a', { href: macroSafeUrl(s.url), target: '_blank', rel: 'noopener noreferrer', text: macroStr(s.titolo || s.title || s.url) })); }))));
+
+    root.appendChild(disclaimer());
+  }
+
+  function disclaimer() {
+    return h('p', { class: 'hint', style: 'margin-top:14px', text: 'Analisi e avvisi scritti da un\'AI' + (M.data && M.data.model ? ' (' + M.data.model + ')' : '') + ' partendo da calendario economico, dati FRED e notizie trovate con la ricerca web. Possono contenere errori o arrivare con qualche minuto di ritardo: sono contesto, non segnali di entrata. Verifica sempre orari e dati sul calendario e decidi sul grafico. L\'analisi si aggiorna al massimo ogni 30 minuti (prima, se esce una notizia ad alto impatto) ed è condivisa tra gli utenti dell\'app.' });
+  }
+
+  M.paint = paint;
+  if (M.push == null) refreshPush();
+  if (!M.loadedLocal) {
+    M.loadedLocal = true;
+    TJDB.get('meta', 'macro:last').then(function (r) {
+      if (r && r.report && !M.data) { M.data = r.report; if (S.view === 'macro' && M.paint) M.paint(); }
+    }).catch(function () {}).then(maybeLoad);
+  } else maybeLoad();
+  // il server decide se rigenerare o restituire quella salvata (risposta immediata); così arrivano anche gli avvisi nuovi
+  function maybeLoad() { var cfg = S.sync && S.sync.cfg; if (cfg && (cfg.access || cfg.refresh) && !M.loading && Date.now() - (M.fetchedAt || 0) > 120000) load(false); }
+  paint();
+  return root;
+}
+
+var NAV = [['dashboard', 'Dashboard', viewDashboard], ['macro', 'Analisi macro', viewMacro], ['journal', 'Trade Journal', viewJournal], ['analytics', 'Analytics', viewAnalytics], ['risk', 'Risk Management', viewRisk], ['accounts', 'Conti', viewAccounts], ['strategies', 'Strategie e setup', viewStrategies], ['psychology', 'Diario psicologico', viewPsychology], ['notes', 'Appunti', viewNotes], ['calendar', 'Calendario', viewCalendar], ['backup', 'Report e backup', viewBackup], ['settings', 'Impostazioni', viewSettings]];
 function navTo(r) {
   if (!NAV.some(function (n) { return n[0] === r; })) r = 'dashboard';
   S.route = r; try { if (location.hash !== '#/' + r) history.replaceState(null, '', '#/' + r); } catch (e) { /* alcuni browser/app bloccano la cronologia: la navigazione funziona comunque */ }
