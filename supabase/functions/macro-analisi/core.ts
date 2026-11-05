@@ -299,7 +299,7 @@ Rispondi SOLO con JSON tra <json> e </json>:
 { "avvisi": [ { "chiave": "identificativo breve e stabile della notizia, es. nfp-2026-11-07 o iran-attacco-israele-2026-11-05", "impatto": "alto" | "medio", "titolo": "max 70 caratteri", "testo": "max 240 caratteri: cosa è successo con i numeri, PERCHÉ conta per l'oro (catena causa → effetto in breve) e cosa fare (es. attendere che si calmi lo spread)", "direzione_oro": "rialzista" | "ribassista" | "incerta", "url": "" } ] }`;
 
 type AiResult = { analysis: any; rawText: string; sources: { titolo: string; url: string }[]; usage: any; model: string };
-class QuotaError extends Error {}
+class QuotaError extends Error {}   // limite gratuito o modello sovraccarico: si prova il modello successivo
 
 function parseJson(text: string): any {
   const m = text.match(/<json>([\s\S]*?)<\/json>/) || text.match(/(\{[\s\S]*\})/);
@@ -308,7 +308,7 @@ function parseJson(text: string): any {
   try { return JSON.parse(body); } catch { return null; }
 }
 
-async function askGemini(model: string, system: string, prompt: string, maxTokens = 12000, search = true): Promise<AiResult> {
+async function askGemini(model: string, system: string, prompt: string, maxTokens = 12000, search = true, retry = 1): Promise<AiResult> {
   const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
     headers: { 'x-goog-api-key': GEMINI_KEY, 'content-type': 'application/json' },
@@ -322,6 +322,11 @@ async function askGemini(model: string, system: string, prompt: string, maxToken
   const j = await r.json().catch(() => null);
   if (!r.ok) {
     const m = j?.error?.message || `HTTP ${r.status}`;
+    // server di Google sovraccarico (503/500/504): un secondo tentativo dopo una breve pausa, poi si passa al modello successivo
+    if (r.status === 503 || r.status === 500 || r.status === 504) {
+      if (retry > 0) { await new Promise((ok) => setTimeout(ok, 2500)); return askGemini(model, system, prompt, maxTokens, search, retry - 1); }
+      throw new QuotaError(`Gemini (${model}) è sovraccarico in questo momento, riprova tra qualche minuto.`);
+    }
     if (r.status === 429) throw new QuotaError(`Limite gratuito di Gemini raggiunto per ${model}${search ? ' con ricerca Google' : ''}, riprova più tardi. (${String(m).slice(0, 160)})`);
     throw new Error(r.status === 400 && /API key/i.test(m) ? 'Chiave GEMINI_API_KEY non valida.' : `Errore Gemini (${model}): ${m}`);
   }
@@ -371,7 +376,7 @@ async function askAnalisi(system: string, prompt: string): Promise<AiResult> {
   if (PROVIDER !== 'gemini') return askClaude(system, prompt);
   const noSearch = GEMINI_SEARCH ? await cfgGet('ricerca_off').catch(() => null) : null;   // se la ricerca è stata rifiutata da poco, non riprovarla subito
   const skipSearch = !GEMINI_SEARCH || (noSearch && Date.now() - noSearch.at < 6 * 3600000);
-  const chain: [string, boolean][] = skipSearch ? [[MODEL, false], [MODEL_FAST, false]] : [[MODEL, true], [MODEL_FAST, true], [MODEL, false], [MODEL_FAST, false]];
+  const chain: [string, boolean][] = skipSearch ? [[MODEL, false], [MODEL_FAST, false], [MODEL, false]] : [[MODEL, true], [MODEL_FAST, true], [MODEL, false], [MODEL_FAST, false]];
   const res = await tryChain(chain, system, prompt);
   if (!skipSearch && res.model.endsWith('(senza ricerca web)')) await cfgSet('ricerca_off', { at: Date.now() }).catch(() => {});
   res.model = res.model.replace(' (senza ricerca web)', ' + Google News');
