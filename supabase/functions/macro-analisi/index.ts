@@ -1,3 +1,3 @@
 import webpush from 'npm:web-push@3.6.7';
-import { start } from 'https://raw.githubusercontent.com/mikaelshametaj-spec/trading-journal/4b6ee1430dc9b2853699c7b0fba040e47512b61b/supabase/functions/macro-analisi/core.ts';
+import { start } from 'https://raw.githubusercontent.com/mikaelshametaj-spec/trading-journal/7f87d79056f95ae9a8c9584059ff495839c4d625/supabase/functions/macro-analisi/core.ts';
 start(webpush);
