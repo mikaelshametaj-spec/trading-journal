@@ -308,23 +308,37 @@ function parseJson(text: string): any {
   try { return JSON.parse(body); } catch { return null; }
 }
 
-async function askGemini(model: string, system: string, prompt: string, maxTokens = 12000, search = true, retry = 1): Promise<AiResult> {
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+const GEMINI_TIMEOUT_MS = 55000;   // ogni tentativo ha al massimo 55 secondi, così resta tempo per i modelli di riserva
+async function askGemini(model: string, system: string, prompt: string, maxTokens = 8000, search = true, retry = 1, thinking = true): Promise<AiResult> {
+  const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), GEMINI_TIMEOUT_MS);
+  let r: Response;
+  try {
+    r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      signal: ctl.signal,
     method: 'POST',
     headers: { 'x-goog-api-key': GEMINI_KEY, 'content-type': 'application/json' },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       ...(search ? { tools: [{ google_search: {} }] } : {}),
-      generationConfig: { temperature: 0.3, maxOutputTokens: maxTokens },
+      // ragionamento breve: risposte molto più veloci, la qualità resta buona perché i dati glieli diamo noi
+      generationConfig: { temperature: 0.3, maxOutputTokens: maxTokens, ...(thinking ? { thinkingConfig: { thinkingLevel: 'low' } } : {}) },
     }),
-  });
+    });
+  } catch (err) {
+    clearTimeout(tm);
+    if ((err as Error).name === 'AbortError') throw new QuotaError(`Gemini (${model}) non ha risposto entro ${GEMINI_TIMEOUT_MS / 1000} secondi.`);
+    throw err;
+  }
+  clearTimeout(tm);
   const j = await r.json().catch(() => null);
+  // se il modello non accetta l'impostazione del ragionamento, si riprova senza
+  if (!r.ok && r.status === 400 && thinking && /thinking/i.test(j?.error?.message || '')) return askGemini(model, system, prompt, maxTokens, search, retry, false);
   if (!r.ok) {
     const m = j?.error?.message || `HTTP ${r.status}`;
     // server di Google sovraccarico (503/500/504): un secondo tentativo dopo una breve pausa, poi si passa al modello successivo
     if (r.status === 503 || r.status === 500 || r.status === 504) {
-      if (retry > 0) { await new Promise((ok) => setTimeout(ok, 2500)); return askGemini(model, system, prompt, maxTokens, search, retry - 1); }
+      if (retry > 0) { await new Promise((ok) => setTimeout(ok, 2500)); return askGemini(model, system, prompt, maxTokens, search, retry - 1, thinking); }
       throw new QuotaError(`Gemini (${model}) è sovraccarico in questo momento, riprova tra qualche minuto.`);
     }
     if (r.status === 429) throw new QuotaError(`Limite gratuito di Gemini raggiunto per ${model}${search ? ' con ricerca Google' : ''}, riprova più tardi. (${String(m).slice(0, 160)})`);
@@ -368,8 +382,10 @@ const RISERVE = ['gemini-3.1-flash-lite', 'gemini-3.6-flash'];   // altri modell
 async function tryChain(chain: [string, boolean][], system: string, prompt: string, maxTokens?: number): Promise<AiResult> {
   const errs: string[] = [], tried = new Set<string>();
   const full: [string, boolean][] = [...chain, ...RISERVE.map((m): [string, boolean] => [m, false])];
+  const t0 = Date.now();
   for (const [model, search] of full) {
     const k = model + search; if (tried.has(k)) continue; tried.add(k);
+    if (Date.now() - t0 > 80000) { errs.push('tempo esaurito per altri tentativi'); break; }   // la funzione ha al massimo 150 secondi
     try { return await askGemini(model, system, prompt, maxTokens, search); }
     catch (err) {
       const msg = (err as Error).message || String(err);
