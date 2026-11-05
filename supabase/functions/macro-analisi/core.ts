@@ -16,7 +16,7 @@
 //   GEMINI_API_KEY     GRATIS (aistudio.google.com) — se c'è, si usa Gemini con ricerca Google
 //   ANTHROPIC_API_KEY  a pagamento — usata solo se manca GEMINI_API_KEY (solo per l'analisi, non per la sorveglianza)
 //   FRED_API_KEY       facoltativo, gratis (fred.stlouisfed.org)
-//   MACRO_MODEL        facoltativo — predefinito gemini-2.5-flash
+//   MACRO_MODEL        facoltativo — predefinito gemini-3.8-flash
 // Le chiavi per le notifiche push vengono create da sole al primo utilizzo e salvate nel database.
 
 // La libreria web-push la passa index.ts (questo file non può importare pacchetti npm perché viene caricato da GitHub).
@@ -29,7 +29,7 @@ const ANTHROPIC_KEY = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
 const GEMINI_KEY = Deno.env.get('GEMINI_API_KEY') ?? '';
 const FRED_KEY = Deno.env.get('FRED_API_KEY') ?? '';
 const PROVIDER = GEMINI_KEY ? 'gemini' : 'claude';
-const MODEL = Deno.env.get('MACRO_MODEL') || (PROVIDER === 'gemini' ? 'gemini-2.5-flash' : 'claude-sonnet-5-5');
+const MODEL = Deno.env.get('MACRO_MODEL') || (PROVIDER === 'gemini' ? 'gemini-3.8-flash' : 'claude-sonnet-5-5');
 
 const FRESH_MS = 3 * 60 * 60 * 1000;   // sotto le 3 ore si usa l'analisi salvata
 const MIN_FORCE_MS = 30 * 60 * 1000;   // mai più di un'analisi ogni 30 minuti
