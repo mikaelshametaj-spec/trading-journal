@@ -18,6 +18,8 @@
 //   FRED_API_KEY       facoltativo, gratis (fred.stlouisfed.org)
 //   MACRO_MODEL        facoltativo — modello per l'analisi, predefinito gemini-3.8-flash (gratis: circa 20 richieste al giorno)
 //   MACRO_MODEL_FAST   facoltativo — modello per la sorveglianza ogni 15 minuti, predefinito gemini-3.5-flash-lite (gratis: circa 500 al giorno)
+//   MACRO_SEARCH       facoltativo — "on" per usare anche la ricerca Google integrata (non inclusa nel piano gratuito di Gemini 3)
+// Le notizie arrivano comunque da Google News (gratis), lette dalla funzione e passate all'AI.
 // Le chiavi per le notifiche push vengono create da sole al primo utilizzo e salvate nel database.
 
 // La libreria web-push la passa index.ts (questo file non può importare pacchetti npm perché viene caricato da GitHub).
@@ -32,6 +34,8 @@ const FRED_KEY = Deno.env.get('FRED_API_KEY') ?? '';
 const PROVIDER = GEMINI_KEY ? 'gemini' : 'claude';
 const MODEL = Deno.env.get('MACRO_MODEL') || (PROVIDER === 'gemini' ? 'gemini-3.8-flash' : 'claude-sonnet-5-5');
 const MODEL_FAST = Deno.env.get('MACRO_MODEL_FAST') || (PROVIDER === 'gemini' ? 'gemini-3.5-flash-lite' : MODEL);
+// ricerca Google integrata di Gemini: sul piano gratuito per Gemini 3 il limite è 0, quindi è spenta (MACRO_SEARCH=on per accenderla con la fatturazione)
+const GEMINI_SEARCH = (Deno.env.get('MACRO_SEARCH') || '').toLowerCase() === 'on';
 
 const FRESH_MS = 3 * 60 * 60 * 1000;   // sotto le 3 ore si usa l'analisi salvata
 const MIN_FORCE_MS = 30 * 60 * 1000;   // mai più di un'analisi ogni 30 minuti
@@ -365,11 +369,12 @@ async function tryChain(chain: [string, boolean][], system: string, prompt: stri
 }
 async function askAnalisi(system: string, prompt: string): Promise<AiResult> {
   if (PROVIDER !== 'gemini') return askClaude(system, prompt);
-  const noSearch = await cfgGet('ricerca_off').catch(() => null);   // se la ricerca è stata rifiutata da poco, non riprovarla subito
-  const skipSearch = noSearch && Date.now() - noSearch.at < 6 * 3600000;
+  const noSearch = GEMINI_SEARCH ? await cfgGet('ricerca_off').catch(() => null) : null;   // se la ricerca è stata rifiutata da poco, non riprovarla subito
+  const skipSearch = !GEMINI_SEARCH || (noSearch && Date.now() - noSearch.at < 6 * 3600000);
   const chain: [string, boolean][] = skipSearch ? [[MODEL, false], [MODEL_FAST, false]] : [[MODEL, true], [MODEL_FAST, true], [MODEL, false], [MODEL_FAST, false]];
   const res = await tryChain(chain, system, prompt);
   if (!skipSearch && res.model.endsWith('(senza ricerca web)')) await cfgSet('ricerca_off', { at: Date.now() }).catch(() => {});
+  res.model = res.model.replace(' (senza ricerca web)', ' + Google News');
   return res;
 }
 // sorveglianza: modello veloce senza ricerca integrata (le notizie arrivano da Google News), così non consuma la quota della ricerca
