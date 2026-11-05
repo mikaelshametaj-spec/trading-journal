@@ -174,6 +174,44 @@ async function fred(): Promise<any[] | { errore: string }> {
     }
   }));
 }
+// ---------- notizie: titoli recenti da Google News (gratis, nessuna chiave) ----------
+type News = { titolo: string; fonte: string; quando: string; ts: number; url: string };
+const NEWS_QUERIES = [
+  'gold price OR XAUUSD OR "gold prices" when:1d',
+  '"Federal Reserve" OR Powell OR FOMC OR "Treasury yields" OR "dollar index" when:1d',
+  'CPI OR inflation OR payrolls OR jobless OR "jobs report" OR PCE US economy when:1d',
+  'war OR attack OR tariffs OR sanctions OR ceasefire markets when:1d',
+];
+function unxml(t: string): string {
+  return t.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/<[^>]+>/g, '').trim();
+}
+async function news(): Promise<News[]> {
+  const cached = await cfgGet('notizie').catch(() => null);
+  if (cached && Date.now() - cached.at < 8 * 60 * 1000 && Array.isArray(cached.items)) return cached.items;
+  const all: News[] = [];
+  await Promise.all(NEWS_QUERIES.map(async (q) => {
+    try {
+      const r = await fetch(`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`, { headers: { 'User-Agent': 'Mozilla/5.0 TradingJournalPro' } });
+      if (!r.ok) return;
+      const xml = await r.text();
+      for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+        const it = m[1], g = (tag: string) => { const x = it.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)); return x ? unxml(x[1]) : ''; };
+        const ts = Date.parse(g('pubDate'));
+        if (!isFinite(ts) || Date.now() - ts > 36 * 3600000) continue;
+        const fonte = g('source'); let titolo = g('title');
+        if (fonte && titolo.endsWith(' - ' + fonte)) titolo = titolo.slice(0, -(fonte.length + 3));
+        all.push({ titolo, fonte, quando: romeFmt.format(new Date(ts)), ts, url: g('link') });
+      }
+    } catch { /* una ricerca che fallisce non blocca le altre */ }
+  }));
+  const seen = new Set<string>(), items: News[] = [];
+  for (const n of all.sort((a, b) => b.ts - a.ts)) { const k = n.titolo.toLowerCase().slice(0, 60); if (!seen.has(k)) { seen.add(k); items.push(n); } }
+  const out = items.slice(0, 45);
+  if (out.length) await cfgSet('notizie', { at: Date.now(), items: out }).catch(() => {});
+  return out.length ? out : (cached?.items ?? []);
+}
+const newsText = (items: News[], maxAgeH = 36) => items.filter((n) => Date.now() - n.ts <= maxAgeH * 3600000).map((n) => `[${n.quando}] ${n.titolo} (${n.fonte})`).join('\n') || 'nessun titolo disponibile';
+
 async function recentAlerts(hours = 24): Promise<any[]> {
   const since = new Date(Date.now() - hours * 3600000).toISOString();
   return await db('GET', `tj_alerts?select=id,created_at,kind,impatto,titolo,testo,direzione,url&created_at=gte.${since}&order=created_at.desc&limit=40`).catch(() => []);
@@ -194,7 +232,7 @@ COME RAGIONA L'ORO (usalo sempre):
 - Acquisti delle banche centrali (Cina/PBoC, India, Polonia, Turchia...), flussi negli ETF, domanda fisica asiatica: supporto di fondo.
 - Liquidazioni forzate nei crolli azionari possono far scendere anche l'oro nel brevissimo.
 REGOLE:
-- Verifica sempre i fatti recenti con la ricerca Google; non inventare MAI numeri, date o dichiarazioni. Se un dato non lo trovi scrivi "non disponibile".
+- Usa i dati e i titoli di notizie che ti fornisco (con il loro orario) e, se hai la ricerca Google, verifica e completa con quella. Non inventare MAI numeri, date o dichiarazioni: se un dato non c'è nei dati forniti né nella ricerca, scrivi "non disponibile".
 - Spiega ogni punto con la catena causa → effetto, in italiano semplice e concreto, con i numeri trovati.
 - Orari sempre in ora italiana, con New York tra parentesi.
 - Non dare entrate, stop o target: il tuo lavoro è il contesto macro, i rischi e il tempismo.
@@ -209,7 +247,7 @@ COLLEGAMENTO CON IL GRAFICO (secondario: viene DOPO la lettura macro e non la so
 
 const SYSTEM_ANALISI = `Sei l'analista macroeconomico e insegnante di fiducia di un trader di oro. ${CONTESTO}
 
-OGNI VOLTA controlla con la ricerca, in quest'ordine:
+OGNI VOLTA controlla (con i dati e le notizie forniti, e con la ricerca se disponibile), in quest'ordine:
 1. Fed: tassi attuali, data del prossimo FOMC, probabilità di taglio/rialzo (CME FedWatch), ultimi discorsi di Powell/membri Fed e il loro tono.
 2. Rendimenti USA a 2 e 10 anni e rendimento reale a 10 anni: livello e direzione della settimana.
 3. DXY: livello e tendenza.
@@ -246,7 +284,7 @@ Ordine di importanza: prima sintesi, fattori, Fed ed eventi spiegati bene; la pa
 
 const SYSTEM_SORVEGLIANZA = `Sei il sistema di allerta notizie di un desk di trading sull'oro. ${CONTESTO}
 
-Il tuo compito ora è SOLO trovare cose NUOVE delle ultime 1-2 ore che possono muovere oro o dollaro e che i trader devono sapere subito:
+Il tuo compito ora è SOLO individuare, tra i titoli e i dati che ti fornisco, cose NUOVE delle ultime 1-2 ore che possono muovere oro o dollaro e che i trader devono sapere subito:
 - dati macro appena usciti (valore effettivo contro previsione, reazione probabile dell'oro e se lo sweep provocato va con o contro il bias macro);
 - dichiarazioni a sorpresa di Fed, Tesoro USA, Casa Bianca, BCE, BoJ, PBoC;
 - eventi geopolitici (attacchi, escalation, cessate il fuoco), dazi e sanzioni, crisi bancarie o di mercato, notizie di rottura sull'oro;
@@ -254,7 +292,7 @@ Il tuo compito ora è SOLO trovare cose NUOVE delle ultime 1-2 ore che possono m
 NON segnalare: notizie già presenti nell'elenco "avvisi già inviati" (anche se scritte in modo diverso), commenti e previsioni di analisti, notizie vecchie, cose a basso impatto. Se non c'è niente di davvero nuovo e rilevante, restituisci una lista vuota: è la risposta normale.
 
 Rispondi SOLO con JSON tra <json> e </json>:
-{ "avvisi": [ { "chiave": "identificativo breve e stabile della notizia, es. nfp-2026-11-07 o iran-attacco-israele-2026-11-05", "impatto": "alto" | "medio", "titolo": "max 70 caratteri", "testo": "max 240 caratteri: cosa è successo con i numeri, PERCHÉ conta per l'oro (catena causa → effetto in breve) e cosa fare (es. attendere che si calmi lo spread)", "direzione_oro": "rialzista" | "ribassista" | "incerta", "url": "fonte" } ] }`;
+{ "avvisi": [ { "chiave": "identificativo breve e stabile della notizia, es. nfp-2026-11-07 o iran-attacco-israele-2026-11-05", "impatto": "alto" | "medio", "titolo": "max 70 caratteri", "testo": "max 240 caratteri: cosa è successo con i numeri, PERCHÉ conta per l'oro (catena causa → effetto in breve) e cosa fare (es. attendere che si calmi lo spread)", "direzione_oro": "rialzista" | "ribassista" | "incerta", "url": "" } ] }`;
 
 type AiResult = { analysis: any; rawText: string; sources: { titolo: string; url: string }[]; usage: any; model: string };
 class QuotaError extends Error {}
@@ -266,21 +304,21 @@ function parseJson(text: string): any {
   try { return JSON.parse(body); } catch { return null; }
 }
 
-async function askGemini(model: string, system: string, prompt: string, maxTokens = 12000): Promise<AiResult> {
+async function askGemini(model: string, system: string, prompt: string, maxTokens = 12000, search = true): Promise<AiResult> {
   const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
     headers: { 'x-goog-api-key': GEMINI_KEY, 'content-type': 'application/json' },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      tools: [{ google_search: {} }],
+      ...(search ? { tools: [{ google_search: {} }] } : {}),
       generationConfig: { temperature: 0.3, maxOutputTokens: maxTokens },
     }),
   });
   const j = await r.json().catch(() => null);
   if (!r.ok) {
     const m = j?.error?.message || `HTTP ${r.status}`;
-    if (r.status === 429) throw new QuotaError(`Limite gratuito di Gemini raggiunto per ${model}, riprova più tardi. (${String(m).slice(0, 160)})`);
+    if (r.status === 429) throw new QuotaError(`Limite gratuito di Gemini raggiunto per ${model}${search ? ' con ricerca Google' : ''}, riprova più tardi. (${String(m).slice(0, 160)})`);
     throw new Error(r.status === 400 && /API key/i.test(m) ? 'Chiave GEMINI_API_KEY non valida.' : `Errore Gemini (${model}): ${m}`);
   }
   const cand = j?.candidates?.[0];
@@ -291,7 +329,7 @@ async function askGemini(model: string, system: string, prompt: string, maxToken
   for (const c of cand?.groundingMetadata?.groundingChunks || []) {
     const u = c?.web?.uri; if (u && !seen.has(u)) { seen.add(u); sources.push({ titolo: c.web.title || u, url: u }); }
   }
-  return { analysis, rawText: analysis ? '' : rawText.slice(0, 6000), sources: sources.slice(0, 15), usage: j?.usageMetadata ?? null, model };
+  return { analysis, rawText: analysis ? '' : rawText.slice(0, 6000), sources: sources.slice(0, 15), usage: j?.usageMetadata ?? null, model: search ? model : model + ' (senza ricerca web)' };
 }
 
 async function askClaude(system: string, prompt: string, maxTokens = 6000): Promise<AiResult> {
@@ -316,12 +354,26 @@ async function askClaude(system: string, prompt: string, maxTokens = 6000): Prom
   return { analysis, rawText: analysis ? '' : rawText.slice(0, 6000), sources: sources.slice(0, 15), usage, model: MODEL };
 }
 // analisi: modello migliore, e se il suo limite gratuito è finito si passa al modello veloce
+// prova in ordine: modello migliore con ricerca, veloce con ricerca, poi gli stessi senza ricerca (solo dati e titoli forniti)
+async function tryChain(chain: [string, boolean][], system: string, prompt: string, maxTokens?: number): Promise<AiResult> {
+  let last: unknown = null;
+  for (const [model, search] of chain) {
+    try { return await askGemini(model, system, prompt, maxTokens, search); }
+    catch (err) { if (!(err instanceof QuotaError)) throw err; last = err; }
+  }
+  throw last;
+}
 async function askAnalisi(system: string, prompt: string): Promise<AiResult> {
   if (PROVIDER !== 'gemini') return askClaude(system, prompt);
-  try { return await askGemini(MODEL, system, prompt); }
-  catch (err) { if (err instanceof QuotaError && MODEL_FAST !== MODEL) return await askGemini(MODEL_FAST, system, prompt); throw err; }
+  const noSearch = await cfgGet('ricerca_off').catch(() => null);   // se la ricerca è stata rifiutata da poco, non riprovarla subito
+  const skipSearch = noSearch && Date.now() - noSearch.at < 6 * 3600000;
+  const chain: [string, boolean][] = skipSearch ? [[MODEL, false], [MODEL_FAST, false]] : [[MODEL, true], [MODEL_FAST, true], [MODEL, false], [MODEL_FAST, false]];
+  const res = await tryChain(chain, system, prompt);
+  if (!skipSearch && res.model.endsWith('(senza ricerca web)')) await cfgSet('ricerca_off', { at: Date.now() }).catch(() => {});
+  return res;
 }
-const askFast = (system: string, prompt: string, maxTokens?: number) => PROVIDER === 'gemini' ? askGemini(MODEL_FAST, system, prompt, maxTokens) : askClaude(system, prompt, maxTokens);
+// sorveglianza: modello veloce senza ricerca integrata (le notizie arrivano da Google News), così non consuma la quota della ricerca
+const askFast = (system: string, prompt: string, maxTokens?: number) => PROVIDER === 'gemini' ? tryChain([[MODEL_FAST, false], [MODEL, false]], system, prompt, maxTokens) : askClaude(system, prompt, maxTokens);
 
 // ---------- notifiche push ----------
 async function vapid(): Promise<{ publicKey: string; privateKey: string }> {
@@ -373,7 +425,7 @@ async function doAnalisi(force: boolean) {
     return { ...last.report, cached: true, limited: force && age < MIN_FORCE_MS, created_at: last.created_at, avvisi: alerts };
   }
   if (!GEMINI_KEY && !ANTHROPIC_KEY) throw new Error('Nessuna chiave AI impostata: aggiungi GEMINI_API_KEY (gratis) nei segreti della funzione.');
-  const [cal, rates] = await Promise.all([calendar(), fred()]);
+  const [cal, rates, nw] = await Promise.all([calendar(), fred(), news()]);
   const prev = last?.report?.analysis;
   const prompt = `Data e ora attuali: ${romeFmt.format(new Date())} ora italiana (${new Date().toISOString()} UTC). Mercato dell'oro ${marketOpen() ? 'APERTO' : 'CHIUSO (weekend)'}.
 Orari di oggi delle sessioni in ora italiana:
@@ -388,6 +440,9 @@ ${JSON.stringify(cal)}
 Dati FRED:
 ${JSON.stringify(rates)}
 
+Titoli di notizie delle ultime 36 ore (Google News, ora italiana, dal più recente):
+${newsText(nw)}
+
 Avvisi di notizie inviati nelle ultime 24 ore:
 ${JSON.stringify(alerts.map((a) => ({ ora: romeFmt.format(new Date(a.created_at)), titolo: a.titolo, testo: a.testo })))}
 
@@ -396,7 +451,8 @@ ${prev ? JSON.stringify({ bias: prev.bias, forza: prev.forza, titolo: prev.titol
 
 Fai le ricerche della tua lista e restituisci il JSON.`;
   const res = await askAnalisi(SYSTEM_ANALISI, prompt);
-  const report = { generated_at: new Date().toISOString(), model: res.model, analysis: res.analysis, raw_text: res.rawText, sources: res.sources, inputs: { calendario: cal, dati_fred: rates }, usage: res.usage };
+  const sources = res.sources.length ? res.sources : nw.slice(0, 10).map((n) => ({ titolo: `${n.titolo} (${n.fonte})`, url: n.url }));
+  const report = { generated_at: new Date().toISOString(), model: res.model, analysis: res.analysis, raw_text: res.rawText, sources, inputs: { calendario: cal, dati_fred: rates }, usage: res.usage };
   if (res.analysis) await db('POST', 'tj_macro', { report }, 'return=minimal');
   return { ...report, cached: false, created_at: report.generated_at, avvisi: alerts };
 }
@@ -432,6 +488,7 @@ async function doControlla() {
   const justOut = rows.filter((e: any) => { const t = new Date(e.date).getTime(); return relevant(e) && t <= now && now - t <= 75 * 60000; }).map(fmtEvent);
   const next = rows.filter((e: any) => { const t = new Date(e.date).getTime(); return relevant(e) && t > now && t - now <= 3 * 3600000; }).map(fmtEvent);
   const sent = await recentAlerts(36);
+  const nw = await news();
   const prompt = `Ora attuale: ${romeFmt.format(new Date())} ora italiana (${new Date().toISOString()} UTC).
 Eventi del calendario usciti negli ultimi 75 minuti (cerca il valore EFFETTIVO e, se è diverso dalle attese, crea un avviso con chiave "dato-<evento>-<data>"):
 ${JSON.stringify(justOut)}
@@ -440,7 +497,10 @@ ${JSON.stringify(next)}
 Avvisi già inviati (NON ripeterli):
 ${JSON.stringify(sent.map((a) => ({ titolo: a.titolo, ora: romeFmt.format(new Date(a.created_at)) })))}
 
-Cerca le ultime notizie su: oro/gold price news, Fed, Treasury yields, dollar index, e notizie geopolitiche o di mercato di rottura delle ultime 2 ore. Poi restituisci il JSON.`;
+Titoli di notizie delle ultime 3 ore (Google News, ora italiana, dal più recente). Segnala SOLO quelli davvero nuovi e capaci di muovere oro o dollaro; per i dati usciti, se il valore effettivo non compare nei titoli, non inventarlo:
+${newsText(nw, 3)}
+
+Restituisci il JSON.`;
   const res = await askFast(SYSTEM_SORVEGLIANZA, prompt, 6000);
   const list = Array.isArray(res.analysis?.avvisi) ? res.analysis.avvisi : [];
   for (const a of list.slice(0, 4)) {
