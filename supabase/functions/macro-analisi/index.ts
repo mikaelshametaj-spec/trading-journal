@@ -346,7 +346,7 @@ async function alert(a: { dedup: string; kind: string; impatto: string; titolo: 
   await sendPush({ title: `${icon} ${a.titolo}`.slice(0, 90), body: (a.testo + dir).slice(0, 260), tag: a.dedup, url: './#/macro' });
   return true;
 }
-const slug = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 120);
+const slug = (s: string) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 120);
 
 // ---------- azioni ----------
 async function doAnalisi(force: boolean) {
