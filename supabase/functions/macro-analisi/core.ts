@@ -364,19 +364,27 @@ async function askClaude(system: string, prompt: string, maxTokens = 6000): Prom
 }
 // analisi: modello migliore, e se il suo limite gratuito è finito si passa al modello veloce
 // prova in ordine: modello migliore con ricerca, veloce con ricerca, poi gli stessi senza ricerca (solo dati e titoli forniti)
+const RISERVE = ['gemini-3.1-flash-lite', 'gemini-3.6-flash'];   // altri modelli gratuiti, usati solo se i primi non rispondono
 async function tryChain(chain: [string, boolean][], system: string, prompt: string, maxTokens?: number): Promise<AiResult> {
-  let last: unknown = null;
-  for (const [model, search] of chain) {
+  const errs: string[] = [], tried = new Set<string>();
+  const full: [string, boolean][] = [...chain, ...RISERVE.map((m): [string, boolean] => [m, false])];
+  for (const [model, search] of full) {
+    const k = model + search; if (tried.has(k)) continue; tried.add(k);
     try { return await askGemini(model, system, prompt, maxTokens, search); }
-    catch (err) { if (!(err instanceof QuotaError)) throw err; last = err; }
+    catch (err) {
+      const msg = (err as Error).message || String(err);
+      // modello inesistente o non abilitato: si passa al successivo; altri errori (es. chiave non valida) fermano tutto
+      if (!(err instanceof QuotaError) && !/not found|not supported|no longer available|is not available|404/i.test(msg)) throw err;
+      errs.push(`${model}: ${msg.slice(0, 170)}`);
+    }
   }
-  throw last;
+  throw new Error('Nessun modello Gemini ha risposto, riprova tra qualche minuto. Dettagli → ' + errs.join(' | '));
 }
 async function askAnalisi(system: string, prompt: string): Promise<AiResult> {
   if (PROVIDER !== 'gemini') return askClaude(system, prompt);
   const noSearch = GEMINI_SEARCH ? await cfgGet('ricerca_off').catch(() => null) : null;   // se la ricerca è stata rifiutata da poco, non riprovarla subito
   const skipSearch = !GEMINI_SEARCH || (noSearch && Date.now() - noSearch.at < 6 * 3600000);
-  const chain: [string, boolean][] = skipSearch ? [[MODEL, false], [MODEL_FAST, false], [MODEL, false]] : [[MODEL, true], [MODEL_FAST, true], [MODEL, false], [MODEL_FAST, false]];
+  const chain: [string, boolean][] = skipSearch ? [[MODEL, false], [MODEL_FAST, false]] : [[MODEL, true], [MODEL_FAST, true], [MODEL, false], [MODEL_FAST, false]];
   const res = await tryChain(chain, system, prompt);
   if (!skipSearch && res.model.endsWith('(senza ricerca web)')) await cfgSet('ricerca_off', { at: Date.now() }).catch(() => {});
   res.model = res.model.replace(' (senza ricerca web)', ' + Google News');
