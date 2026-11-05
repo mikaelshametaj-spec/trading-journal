@@ -16,7 +16,8 @@
 //   GEMINI_API_KEY     GRATIS (aistudio.google.com) — se c'è, si usa Gemini con ricerca Google
 //   ANTHROPIC_API_KEY  a pagamento — usata solo se manca GEMINI_API_KEY (solo per l'analisi, non per la sorveglianza)
 //   FRED_API_KEY       facoltativo, gratis (fred.stlouisfed.org)
-//   MACRO_MODEL        facoltativo — predefinito gemini-3.8-flash
+//   MACRO_MODEL        facoltativo — modello per l'analisi, predefinito gemini-3.8-flash (gratis: circa 20 richieste al giorno)
+//   MACRO_MODEL_FAST   facoltativo — modello per la sorveglianza ogni 15 minuti, predefinito gemini-3.5-flash-lite (gratis: circa 500 al giorno)
 // Le chiavi per le notifiche push vengono create da sole al primo utilizzo e salvate nel database.
 
 // La libreria web-push la passa index.ts (questo file non può importare pacchetti npm perché viene caricato da GitHub).
@@ -30,6 +31,7 @@ const GEMINI_KEY = Deno.env.get('GEMINI_API_KEY') ?? '';
 const FRED_KEY = Deno.env.get('FRED_API_KEY') ?? '';
 const PROVIDER = GEMINI_KEY ? 'gemini' : 'claude';
 const MODEL = Deno.env.get('MACRO_MODEL') || (PROVIDER === 'gemini' ? 'gemini-3.8-flash' : 'claude-sonnet-5-5');
+const MODEL_FAST = Deno.env.get('MACRO_MODEL_FAST') || (PROVIDER === 'gemini' ? 'gemini-3.5-flash-lite' : MODEL);
 
 const FRESH_MS = 3 * 60 * 60 * 1000;   // sotto le 3 ore si usa l'analisi salvata
 const MIN_FORCE_MS = 30 * 60 * 1000;   // mai più di un'analisi ogni 30 minuti
@@ -254,7 +256,8 @@ NON segnalare: notizie già presenti nell'elenco "avvisi già inviati" (anche se
 Rispondi SOLO con JSON tra <json> e </json>:
 { "avvisi": [ { "chiave": "identificativo breve e stabile della notizia, es. nfp-2026-11-07 o iran-attacco-israele-2026-11-05", "impatto": "alto" | "medio", "titolo": "max 70 caratteri", "testo": "max 240 caratteri: cosa è successo con i numeri, PERCHÉ conta per l'oro (catena causa → effetto in breve) e cosa fare (es. attendere che si calmi lo spread)", "direzione_oro": "rialzista" | "ribassista" | "incerta", "url": "fonte" } ] }`;
 
-type AiResult = { analysis: any; rawText: string; sources: { titolo: string; url: string }[]; usage: any };
+type AiResult = { analysis: any; rawText: string; sources: { titolo: string; url: string }[]; usage: any; model: string };
+class QuotaError extends Error {}
 
 function parseJson(text: string): any {
   const m = text.match(/<json>([\s\S]*?)<\/json>/) || text.match(/(\{[\s\S]*\})/);
@@ -263,8 +266,8 @@ function parseJson(text: string): any {
   try { return JSON.parse(body); } catch { return null; }
 }
 
-async function askGemini(system: string, prompt: string, maxTokens = 12000): Promise<AiResult> {
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`, {
+async function askGemini(model: string, system: string, prompt: string, maxTokens = 12000): Promise<AiResult> {
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
     headers: { 'x-goog-api-key': GEMINI_KEY, 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -277,7 +280,8 @@ async function askGemini(system: string, prompt: string, maxTokens = 12000): Pro
   const j = await r.json().catch(() => null);
   if (!r.ok) {
     const m = j?.error?.message || `HTTP ${r.status}`;
-    throw new Error(r.status === 400 && /API key/i.test(m) ? 'Chiave GEMINI_API_KEY non valida.' : r.status === 429 ? 'Limite gratuito di Gemini raggiunto per ora, riprova più tardi.' : `Errore Gemini: ${m}`);
+    if (r.status === 429) throw new QuotaError(`Limite gratuito di Gemini raggiunto per ${model}, riprova più tardi. (${String(m).slice(0, 160)})`);
+    throw new Error(r.status === 400 && /API key/i.test(m) ? 'Chiave GEMINI_API_KEY non valida.' : `Errore Gemini (${model}): ${m}`);
   }
   const cand = j?.candidates?.[0];
   const rawText = (cand?.content?.parts || []).filter((p: any) => typeof p.text === 'string' && !p.thought).map((p: any) => p.text).join('');
@@ -287,7 +291,7 @@ async function askGemini(system: string, prompt: string, maxTokens = 12000): Pro
   for (const c of cand?.groundingMetadata?.groundingChunks || []) {
     const u = c?.web?.uri; if (u && !seen.has(u)) { seen.add(u); sources.push({ titolo: c.web.title || u, url: u }); }
   }
-  return { analysis, rawText: analysis ? '' : rawText.slice(0, 6000), sources: sources.slice(0, 15), usage: j?.usageMetadata ?? null };
+  return { analysis, rawText: analysis ? '' : rawText.slice(0, 6000), sources: sources.slice(0, 15), usage: j?.usageMetadata ?? null, model };
 }
 
 async function askClaude(system: string, prompt: string, maxTokens = 6000): Promise<AiResult> {
@@ -309,9 +313,15 @@ async function askClaude(system: string, prompt: string, maxTokens = 6000): Prom
   const analysis = parseJson(rawText);
   const seen = new Set<string>(); const sources: { titolo: string; url: string }[] = [];
   for (const b of all) if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) for (const it of b.content) if (it.url && !seen.has(it.url)) { seen.add(it.url); sources.push({ titolo: it.title || it.url, url: it.url }); }
-  return { analysis, rawText: analysis ? '' : rawText.slice(0, 6000), sources: sources.slice(0, 15), usage };
+  return { analysis, rawText: analysis ? '' : rawText.slice(0, 6000), sources: sources.slice(0, 15), usage, model: MODEL };
 }
-const askAI = (system: string, prompt: string, maxTokens?: number) => PROVIDER === 'gemini' ? askGemini(system, prompt, maxTokens) : askClaude(system, prompt, maxTokens);
+// analisi: modello migliore, e se il suo limite gratuito è finito si passa al modello veloce
+async function askAnalisi(system: string, prompt: string): Promise<AiResult> {
+  if (PROVIDER !== 'gemini') return askClaude(system, prompt);
+  try { return await askGemini(MODEL, system, prompt); }
+  catch (err) { if (err instanceof QuotaError && MODEL_FAST !== MODEL) return await askGemini(MODEL_FAST, system, prompt); throw err; }
+}
+const askFast = (system: string, prompt: string, maxTokens?: number) => PROVIDER === 'gemini' ? askGemini(MODEL_FAST, system, prompt, maxTokens) : askClaude(system, prompt, maxTokens);
 
 // ---------- notifiche push ----------
 async function vapid(): Promise<{ publicKey: string; privateKey: string }> {
@@ -385,8 +395,8 @@ Analisi precedente${last ? ' (' + romeFmt.format(new Date(last.created_at)) + ')
 ${prev ? JSON.stringify({ bias: prev.bias, forza: prev.forza, titolo: prev.titolo, sintesi: prev.sintesi }) : 'nessuna'}
 
 Fai le ricerche della tua lista e restituisci il JSON.`;
-  const res = await askAI(SYSTEM_ANALISI, prompt);
-  const report = { generated_at: new Date().toISOString(), model: MODEL, analysis: res.analysis, raw_text: res.rawText, sources: res.sources, inputs: { calendario: cal, dati_fred: rates }, usage: res.usage };
+  const res = await askAnalisi(SYSTEM_ANALISI, prompt);
+  const report = { generated_at: new Date().toISOString(), model: res.model, analysis: res.analysis, raw_text: res.rawText, sources: res.sources, inputs: { calendario: cal, dati_fred: rates }, usage: res.usage };
   if (res.analysis) await db('POST', 'tj_macro', { report }, 'return=minimal');
   return { ...report, cached: false, created_at: report.generated_at, avvisi: alerts };
 }
@@ -431,7 +441,7 @@ Avvisi già inviati (NON ripeterli):
 ${JSON.stringify(sent.map((a) => ({ titolo: a.titolo, ora: romeFmt.format(new Date(a.created_at)) })))}
 
 Cerca le ultime notizie su: oro/gold price news, Fed, Treasury yields, dollar index, e notizie geopolitiche o di mercato di rottura delle ultime 2 ore. Poi restituisci il JSON.`;
-  const res = await askAI(SYSTEM_SORVEGLIANZA, prompt, 6000);
+  const res = await askFast(SYSTEM_SORVEGLIANZA, prompt, 6000);
   const list = Array.isArray(res.analysis?.avvisi) ? res.analysis.avvisi : [];
   for (const a of list.slice(0, 4)) {
     if (!a || !a.titolo || !['alto', 'medio'].includes(a.impatto)) continue;
