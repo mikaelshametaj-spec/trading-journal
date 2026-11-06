@@ -3107,7 +3107,7 @@ function viewMacro() {
       h('span', { class: 'sp' }),
       h('button', { class: 'btn primary', type: 'button', disabled: M.loading || !logged, text: M.loading ? 'Analisi in corso…' : (d ? '↻ Aggiorna analisi' : 'Genera analisi'), onclick: function () { load(true); } })));
 
-    if (!logged) root.appendChild(h('div', { class: 'banner warn' }, h('b', { text: 'Accesso richiesto. ' }), 'L\'analisi macro e gli avvisi usano il tuo account del journal. Accedi in ', h('a', { href: '#/settings', text: 'Impostazioni' }), ' (sezione sincronizzazione) e torna qui.'));
+    if (!logged) root.appendChild(h('div', { class: 'banner warn' }, h('b', { text: cfg ? 'Sessione scaduta. ' : 'Accesso richiesto. ' }), cfg ? 'Inserisci di nuovo la password in ' : 'L\'analisi macro e gli avvisi usano il tuo account del journal. Accedi in ', h('a', { href: '#/settings', text: 'Impostazioni' }), ' (sezione sincronizzazione) e torna qui.'));
     if (M.loading) root.appendChild(h('div', { class: 'banner', role: 'status' }, h('b', { text: 'Sto leggendo calendario, rendimenti e notizie… ' }), 'Se serve una nuova analisi ci vogliono 30-90 secondi.'));
     if (M.err) root.appendChild(h('div', { class: 'banner err', role: 'alert' }, h('b', { text: 'Analisi non disponibile. ' }), M.err));
     if (M.note) root.appendChild(h('div', { class: 'banner', role: 'status', text: M.note }));
@@ -3337,6 +3337,7 @@ function syncUrlOk(u) {
 function syncSetState(state, msg) { S.sync.state = state; S.sync.msg = msg || ''; if (state === 'ok') S.sync.at = Date.now(); paintStatus(); var el = document.getElementById('syncline'); if (el) el.textContent = syncLine(); }
 function syncLine() {
   var s = S.sync; if (!s.cfg) return 'Sincronizzazione non attiva.';
+  if (!s.cfg.refresh) return 'Sessione scaduta: inserisci la password qui sotto per accedere di nuovo.';
   var t = s.at ? new Date(s.at).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
   if (s.state === 'syncing') return 'Sincronizzazione in corso…';
   if (s.state === 'ok') return 'Sincronizzato alle ' + t + (s.lastCounts ? ' (ricevuti ' + s.lastCounts.pulled + ', inviati ' + s.lastCounts.pushed + ')' : '') + '.';
@@ -3469,6 +3470,19 @@ function syncCard() {
   var line = h('p', { class: 'note', id: 'syncline', role: 'status', text: syncLine() });
   if (s.cfg) {
     card.appendChild(line);
+    if (!s.cfg.refresh) {
+      var rP = h('input', { class: 'f', type: 'password', autocomplete: 'current-password', 'aria-label': 'Password' }), rErr = h('div', { class: 'err', role: 'alert' });
+      var rBtn = h('button', { class: 'btn primary', type: 'button', text: 'Accedi di nuovo', onclick: function () {
+        rErr.textContent = ''; if (rP.value.length < 6) { rErr.textContent = 'Inserisci la password (min. 6 caratteri).'; return; }
+        rBtn.disabled = true;
+        syncAuth('login', s.cfg.email, rP.value).then(function (r) {
+          if (r.needConfirm) { rErr.textContent = 'Conferma prima l\'email ricevuta, poi riprova.'; rBtn.disabled = false; return; }
+          toast('Accesso effettuato.'); S.sync.started = false; return syncStart().then(function () { render(); });
+        }, function (e) { rBtn.disabled = false; rErr.textContent = 'Accesso non riuscito: ' + friendlyError(e); });
+      } });
+      card.appendChild(h('div', { class: 'banner warn', style: 'margin:8px 0' }, h('b', { text: 'Sessione scaduta. ' }), 'Inserisci la password dell\'account ' + s.cfg.email + ' per riattivare sincronizzazione, analisi macro e avvisi. I tuoi dati non vengono toccati.'));
+      card.appendChild(h('label', {}, 'Password', rP)); card.appendChild(rErr); card.appendChild(h('div', { class: 'row' }, rBtn));
+    }
     card.appendChild(h('p', { class: 'hint', text: 'Account: ' + s.cfg.email + ' · progetto ' + s.cfg.url.replace('https://', '') + '. Ogni salvataggio viene inviato in pochi secondi; i cambiamenti fatti sull\'altro dispositivo arrivano all\'apertura, ogni minuto e quando torni sulla pagina. Funziona anche offline: i dati vengono inviati appena torna la rete.' }));
     card.appendChild(h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', text: 'Sincronizza ora', onclick: function () { syncRun().then(function () { render(); }); } }),
       h('button', { class: 'btn', type: 'button', text: 'Disattiva su questo dispositivo', onclick: function () { askConfirm({ title: 'Disattivare la sincronizzazione?', message: 'Su questo dispositivo smetterà di inviare e ricevere. I dati locali e quelli sul server NON vengono cancellati.', confirmLabel: 'Disattiva' }).then(function (ok) { if (ok) syncDisable().then(function () { toast('Sincronizzazione disattivata.'); render(); }); }); } })));
