@@ -3455,6 +3455,8 @@ function syncStart() {
   if (S.sync.started) return Promise.resolve(); S.sync.started = true;
   return syncLoad().then(function () {
     if (!S.sync.cfg) return;
+    // la prima schermata viene disegnata prima che il login sia letto dall'archivio: se è l'analisi macro, ridisegnala ora
+    if (S.view === 'macro') render();
     if (!S.sync.listening) { S.sync.listening = true;
       document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') syncRun(); });
       window.addEventListener('online', function () { syncRun(); });
